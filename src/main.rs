@@ -36,9 +36,12 @@ const USAGE: &str = "\
 aes256 - encrypt and decrypt files with AES-256-GCM
 
 USAGE:
-    aes256 encrypt [FILE]    encrypt FILE to FILE.enc, then delete FILE
-    aes256 decrypt [FILE]    decrypt FILE.enc back to FILE
-    aes256                   choose interactively
+    encrypt [FILE]    encrypt FILE to FILE.enc, then delete FILE
+    decrypt [FILE]    decrypt FILE.enc back to FILE
+    aes256            choose interactively
+
+`encrypt` and `decrypt` are links to aes256; `aes256 encrypt [FILE]` and
+`aes256 decrypt [FILE]` do the same thing.
 
 Anything not given on the command line is asked for. When asked for a key,
 enter 64 hex characters or the path to a 32-byte key file.
@@ -76,7 +79,16 @@ impl Drop for UnusedKeyFile {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args = std::env::args();
+    let program = args.next().unwrap_or_default();
+    let mut args: Vec<String> = args.collect();
+
+    // Started through the `encrypt` or `decrypt` link: the name is the command.
+    let name = Path::new(&program).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if matches!(name, "encrypt" | "decrypt") {
+        args.insert(0, name.to_owned());
+    }
+
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -87,6 +99,10 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "-h" || a == "--help") || args.first().is_some_and(|a| a == "help") {
+        print!("{USAGE}");
+        return Ok(());
+    }
     if args.len() > 2 {
         return Err(format!("too many arguments\n\n{USAGE}"));
     }
@@ -94,10 +110,6 @@ fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("encrypt" | "enc" | "e") => encrypt_command(file),
         Some("decrypt" | "dec" | "d") => decrypt_command(file),
-        Some("-h" | "--help" | "help") => {
-            print!("{USAGE}");
-            Ok(())
-        }
         Some(other) => Err(format!("unknown command '{other}'\n\n{USAGE}")),
         None => loop {
             match ask("Encrypt or decrypt? [e/d]: ")?.to_ascii_lowercase().as_str() {
