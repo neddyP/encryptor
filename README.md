@@ -8,6 +8,14 @@ encrypt report.pdf        # → report.pdf.enc, original securely deleted
 decrypt report.pdf.enc    # → report.pdf
 ```
 
+Install it with npm on Linux or macOS:
+
+```
+npm install -g @neddyp/encryptor
+```
+
+See [Install](#install) for details, including permission errors.
+
 ## Features
 
 - **AES-256-GCM authenticated encryption.** Any change to an encrypted file,
@@ -35,18 +43,49 @@ decrypt report.pdf.enc    # → report.pdf
 ### With npm
 
 Works on Linux and macOS, on both x64 and arm64 (Apple Silicon), with
-Node.js 16 or newer:
+Node.js 16 or newer. The package ships a prebuilt binary for each platform,
+so you don't need Rust.
 
 ```
 npm install -g @neddyp/encryptor
 ```
 
-That puts `encrypt` and `decrypt` on your `PATH`. The package ships a
-prebuilt binary for each platform, so you don't need Rust. To remove it:
+That puts `encrypt` and `decrypt` on your `PATH`. Check it worked:
+
+```
+encrypt --help
+```
+
+**Permission denied (`EACCES`)?** On Linux with Node from your distribution's
+packages, global installs go into `/usr/local`, which needs root. Either
+install with sudo:
+
+```
+sudo npm install -g @neddyp/encryptor
+```
+
+or have npm install global packages into your home directory instead, once,
+and then install without sudo. `~/.local/bin` must be on your `PATH`; most
+distributions add it automatically if it exists when you log in.
+
+```
+npm config set prefix ~/.local
+npm install -g @neddyp/encryptor
+```
+
+**Updating** to the latest release (add `sudo` if you installed with it):
+
+```
+npm install -g @neddyp/encryptor@latest
+```
+
+**Uninstalling:**
 
 ```
 npm uninstall -g @neddyp/encryptor
 ```
+
+Windows isn't supported; npm refuses to install there with `EBADPLATFORM`.
 
 ### From source
 
@@ -73,6 +112,9 @@ Reload with `source ~/.bashrc` and check with `type encrypt`.
 `bin/encrypt` and `bin/decrypt` are symlinks to `target/release/aes256`, so
 rebuilding updates them automatically. After a `cargo clean`, run
 `cargo build --release` again to bring them back.
+
+If you also have the npm package installed, whichever `encrypt` comes first
+on your `PATH` is the one that runs. `type -a encrypt` lists them all.
 
 ## Usage
 
