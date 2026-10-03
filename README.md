@@ -233,23 +233,31 @@ All the code is in `src/main.rs`. It uses the RustCrypto
 
 ## Releasing
 
-Releases are built and published by `.github/workflows/release.yml`:
+Releases are built and published by `.github/workflows/release.yml`, using
+npm trusted publishing so no npm token is stored in the repo. Each release
+tests and builds static Linux binaries (x64 and arm64) and macOS binaries
+(x64 and arm64) and packs them into the npm package.
 
-1. Set the new version in both `Cargo.toml` and `npm/package.json`.
-2. Commit, then tag and push:
+- **Monthly, automatically.** On the 1st of each month, if anything that goes
+  into the package (`src/`, `Cargo.toml`, `Cargo.lock`, `npm/`, `README.md`)
+  changed since the last `v*` tag, the workflow bumps the patch version,
+  commits and tags it as `github-actions[bot]`, and publishes. If you've
+  already raised the version by hand, it releases that version instead. If
+  nothing changed, it stops before building.
+- **Straight away, with a tag.** Set the new version in both `Cargo.toml` and
+  `npm/package.json`, commit, then:
 
-   ```
-   git tag v0.2.0
-   git push origin master v0.2.0
-   ```
+  ```
+  git tag v0.2.0
+  git push origin master v0.2.0
+  ```
 
-The workflow tests and builds static Linux binaries (x64 and arm64) and macOS
-binaries (x64 and arm64), packs them into the npm package and publishes it
-using npm trusted publishing, so no npm token is stored in the repo. It stops
-if the tag and the two version numbers don't all match.
+  The workflow stops if the tag and the two version numbers don't all match.
+- **Dry run.** Running the workflow by hand from the Actions tab does
+  everything except the publish.
 
-Running the workflow by hand from the Actions tab does everything except the
-publish and keeps the packed tarball as the `npm-package` artifact.
+Every run keeps the packed tarball as the `npm-package` artifact. The
+decision logic is in `.github/release-plan.sh`.
 
 The npm package lives in `npm/`. `bin/*.js` are small Node launchers that run
 the right binary from `vendor/<platform>/aes256`, which `npm/stage.sh` fills

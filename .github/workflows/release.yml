@@ -1,13 +1,21 @@
 name: Release
 
-# Pushing a tag like v0.2.0 builds the binaries for every platform, packs
-# @neddyp/encryptor and publishes it to npm through trusted publishing.
+# Builds the binaries for every platform, packs @neddyp/encryptor and
+# publishes it to npm through trusted publishing. What a run does is decided
+# by .github/release-plan.sh:
 #
-# Running the workflow by hand (Actions > Release > Run workflow) does all of
-# that except the publish, which becomes `npm publish --dry-run`. Either way
-# the packed tarball is kept as the `npm-package` artifact.
+#   Monthly (1st, 09:17 UTC)  if files that go into the package changed since
+#                             the last v* tag, bump the patch version, commit
+#                             and tag it, and publish. Otherwise stop before
+#                             building anything.
+#   Push a v* tag             publish that version.
+#   Run by hand               build and pack, then `npm publish --dry-run`.
+#
+# The packed tarball is kept as the `npm-package` artifact.
 
 on:
+  schedule:
+    - cron: "17 9 1 * *"
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -15,43 +23,53 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  check:
-    name: Check versions
+  plan:
+    name: Plan release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # monthly releases push the version bump and tag
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      ref: ${{ steps.plan.outputs.ref }}
     steps:
       - uses: actions/checkout@v7
-      - name: Cargo.toml, npm/package.json and the tag agree
-        run: |
-          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
-          npm_version=$(node -p "require('./npm/package.json').version")
-          echo "Cargo.toml: $cargo_version  npm/package.json: $npm_version  ref: $GITHUB_REF_NAME"
-          if [ "$cargo_version" != "$npm_version" ]; then
-            echo "::error::Cargo.toml ($cargo_version) and npm/package.json ($npm_version) versions differ"
-            exit 1
-          fi
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo_version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match version $cargo_version"
-            exit 1
-          fi
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: .github/release-plan.sh
+      - name: Push the release commit and tag
+        if: github.event_name == 'schedule' && steps.plan.outputs.mode == 'publish'
+        run: git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/${{ steps.plan.outputs.ref }}"
 
   build-linux:
     name: Build Linux (x64, arm64)
-    needs: check
+    needs: plan
+    if: needs.plan.outputs.mode != 'skip'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
           tool: cross
       # Static musl binaries run on any Linux distribution. The arm64 tests run
-      # under emulation inside cross's container.
+      # under emulation inside cross's container. target/release holds build
+      # scripts compiled inside the previous target's container, which may not
+      # run in the next one, so it's cleared between targets.
       - name: Test and build
         run: |
           mkdir -p out
           for pair in x86_64-unknown-linux-musl:linux-x64 aarch64-unknown-linux-musl:linux-arm64; do
             target=${pair%%:*} platform=${pair##*:}
+            rm -rf target/release
             cross test --release --target "$target"
             cross build --release --target "$target"
             cp "target/$target/release/aes256" "out/aes256-$platform"
@@ -66,10 +84,13 @@ jobs:
 
   build-macos:
     name: Build macOS (x64, arm64)
-    needs: check
+    needs: plan
+    if: needs.plan.outputs.mode != 'skip'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -92,13 +113,16 @@ jobs:
 
   publish:
     name: Pack and publish
-    needs: [build-linux, build-macos]
+    needs: [plan, build-linux, build-macos]
+    if: needs.plan.outputs.mode != 'skip'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC)
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -122,8 +146,8 @@ jobs:
           if-no-files-found: error
       # Provenance attestations aren't available for private repositories.
       - name: Publish
-        if: github.ref_type == 'tag'
+        if: needs.plan.outputs.mode == 'publish'
         run: npm publish ./neddyp-encryptor-*.tgz --provenance=false
       - name: Publish (dry run)
-        if: github.ref_type != 'tag'
+        if: needs.plan.outputs.mode == 'dry-run'
         run: npm publish ./neddyp-encryptor-*.tgz --provenance=false --dry-run
