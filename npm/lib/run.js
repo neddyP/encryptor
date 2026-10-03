@@ -1,7 +1,7 @@
 "use strict";
 
-// Runs the prebuilt aes256 binary for this platform with the given command
-// (`encrypt` or `decrypt`) followed by the user's arguments.
+// Runs the prebuilt aes256 binary for this platform with the user's arguments,
+// preceded by `command` (`encrypt` or `decrypt`) when one is given.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -17,7 +17,12 @@ module.exports = function run(command) {
     process.exit(1);
   }
 
-  const result = spawnSync(binary, [command, ...process.argv.slice(2)], { stdio: "inherit" });
+  const args = process.argv.slice(2);
+  if (command) {
+    args.unshift(command);
+  }
+
+  const result = spawnSync(binary, args, { stdio: "inherit" });
   if (result.error) {
     console.error(`encryptor: could not run ${binary}: ${result.error.message}`);
     process.exit(1);

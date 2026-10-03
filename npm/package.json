@@ -13,6 +13,7 @@
   ],
   "license": "MIT",
   "bin": {
+    "aes256": "bin/aes256.js",
     "encrypt": "bin/encrypt.js",
     "decrypt": "bin/decrypt.js"
   },

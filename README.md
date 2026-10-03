@@ -50,7 +50,7 @@ so you don't need Rust.
 npm install -g @neddyp/encryptor
 ```
 
-That puts `encrypt` and `decrypt` on your `PATH`. Check it worked:
+That puts `encrypt`, `decrypt` and `aes256` on your `PATH`. Check it worked:
 
 ```
 encrypt --help
@@ -99,8 +99,8 @@ cd encryptor
 cargo build --release
 ```
 
-Then put the repo's `bin/` folder on your `PATH` so `encrypt` and `decrypt`
-work from any directory. Add this to `~/.bashrc`, adjusting the path to where
+Then put the repo's `bin/` folder on your `PATH` so `encrypt`, `decrypt` and
+`aes256` work from any directory. Add this to `~/.bashrc`, adjusting the path to where
 you cloned the repo:
 
 ```bash
@@ -109,9 +109,9 @@ export PATH="$HOME/encryptor/bin:$PATH"
 
 Reload with `source ~/.bashrc` and check with `type encrypt`.
 
-`bin/encrypt` and `bin/decrypt` are symlinks to `target/release/aes256`, so
-rebuilding updates them automatically. After a `cargo clean`, run
-`cargo build --release` again to bring them back.
+`bin/encrypt`, `bin/decrypt` and `bin/aes256` are symlinks to
+`target/release/aes256`, so rebuilding updates them automatically. After a
+`cargo clean`, run `cargo build --release` again to bring them back.
 
 If you also have the npm package installed, whichever `encrypt` comes first
 on your `PATH` is the one that runs. `type -a encrypt` lists them all.
