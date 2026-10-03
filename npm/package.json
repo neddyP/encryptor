@@ -11,7 +11,7 @@
     "encrypt",
     "decrypt"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "bin": {
     "encrypt": "bin/encrypt.js",
     "decrypt": "bin/decrypt.js"

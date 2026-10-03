@@ -3,6 +3,7 @@ name = "aes256"
 version = "0.1.0"
 edition = "2024"
 description = "Encrypt and decrypt files with AES-256-GCM from the command line"
+license = "MIT"
 
 [dependencies]
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }

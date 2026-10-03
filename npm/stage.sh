@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepares npm/ for packing: checks the versions agree, then copies in the
-# release binaries and the README.
+# release binaries, the README and the license.
 #
 #   npm/stage.sh <binaries-dir>
 #
@@ -25,5 +25,5 @@ for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
   cp "$src/aes256-$platform" "$here/vendor/$platform/aes256"
   chmod 755 "$here/vendor/$platform/aes256"
 done
-cp "$root/README.md" "$here/README.md"
+cp "$root/README.md" "$root/LICENSE" "$here/"
 echo "staged @neddyp/encryptor $npm_version"

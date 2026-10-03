@@ -3,3 +3,4 @@
 *.tgz
 /npm/vendor/
 /npm/README.md
+/npm/LICENSE

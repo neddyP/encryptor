@@ -239,8 +239,8 @@ tests and builds static Linux binaries (x64 and arm64) and macOS binaries
 (x64 and arm64) and packs them into the npm package.
 
 - **Monthly, automatically.** On the 1st of each month, if anything that goes
-  into the package (`src/`, `Cargo.toml`, `Cargo.lock`, `npm/`, `README.md`)
-  changed since the last `v*` tag, the workflow bumps the patch version,
+  into the package (`src/`, `Cargo.toml`, `Cargo.lock`, `npm/`, `README.md`,
+  `LICENSE`) changed since the last `v*` tag, the workflow bumps the patch version,
   commits and tags it as `github-actions[bot]`, and publishes. If you've
   already raised the version by hand, it releases that version instead. If
   nothing changed, it stops before building.
@@ -262,3 +262,7 @@ decision logic is in `.github/release-plan.sh`.
 The npm package lives in `npm/`. `bin/*.js` are small Node launchers that run
 the right binary from `vendor/<platform>/aes256`, which `npm/stage.sh` fills
 in from the build artifacts.
+
+## License
+
+MIT. See the `LICENSE` file.
