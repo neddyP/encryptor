@@ -1,0 +1,129 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the binaries for every platform, packs
+# @neddyp/encryptor and publishes it to npm through trusted publishing.
+#
+# Running the workflow by hand (Actions > Release > Run workflow) does all of
+# that except the publish, which becomes `npm publish --dry-run`. Either way
+# the packed tarball is kept as the `npm-package` artifact.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cargo.toml, npm/package.json and the tag agree
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          npm_version=$(node -p "require('./npm/package.json').version")
+          echo "Cargo.toml: $cargo_version  npm/package.json: $npm_version  ref: $GITHUB_REF_NAME"
+          if [ "$cargo_version" != "$npm_version" ]; then
+            echo "::error::Cargo.toml ($cargo_version) and npm/package.json ($npm_version) versions differ"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $cargo_version"
+            exit 1
+          fi
+
+  build-linux:
+    name: Build Linux (x64, arm64)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      # Static musl binaries run on any Linux distribution. The arm64 tests run
+      # under emulation inside cross's container.
+      - name: Test and build
+        run: |
+          mkdir -p out
+          for pair in x86_64-unknown-linux-musl:linux-x64 aarch64-unknown-linux-musl:linux-arm64; do
+            target=${pair%%:*} platform=${pair##*:}
+            cross test --release --target "$target"
+            cross build --release --target "$target"
+            cp "target/$target/release/aes256" "out/aes256-$platform"
+          done
+          file out/*
+          out/aes256-linux-x64 --help
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-linux
+          path: out/
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS (x64, arm64)
+    needs: check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Test and build
+        run: |
+          cargo test --release
+          mkdir -p out
+          for pair in aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-x64; do
+            target=${pair%%:*} platform=${pair##*:}
+            cargo build --release --target "$target"
+            cp "target/$target/release/aes256" "out/aes256-$platform"
+          done
+          file out/*
+          if [ "$(uname -m)" = arm64 ]; then out/aes256-darwin-arm64 --help; else out/aes256-darwin-x64 --help; fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-macos
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    name: Pack and publish
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@latest
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: binaries
+      - name: Stage and pack
+        run: |
+          npm/stage.sh binaries
+          npm pack ./npm
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: neddyp-encryptor-*.tgz
+          if-no-files-found: error
+      # Provenance attestations aren't available for private repositories.
+      - name: Publish
+        if: github.ref_type == 'tag'
+        run: npm publish ./neddyp-encryptor-*.tgz --provenance=false
+      - name: Publish (dry run)
+        if: github.ref_type != 'tag'
+        run: npm publish ./neddyp-encryptor-*.tgz --provenance=false --dry-run

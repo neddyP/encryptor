@@ -30,20 +30,29 @@ decrypt report.pdf.enc    # → report.pdf
 - **Crash-safe writes.** Output goes to a temporary file that is renamed into
   place, so a half-written file never appears under the final name.
 
-## Requirements
-
-- Linux or another Unix-like OS
-- Rust 1.89 or newer (`rustc --version`)
-
-On Ubuntu 26.04 and later, the packaged Rust is new enough:
-
-```
-sudo apt install rustc cargo
-```
-
-Otherwise install it from [rustup.rs](https://rustup.rs).
-
 ## Install
+
+### With npm
+
+Works on Linux and macOS, on both x64 and arm64 (Apple Silicon), with
+Node.js 16 or newer:
+
+```
+npm install -g @neddyp/encryptor
+```
+
+That puts `encrypt` and `decrypt` on your `PATH`. The package ships a
+prebuilt binary for each platform, so you don't need Rust. To remove it:
+
+```
+npm uninstall -g @neddyp/encryptor
+```
+
+### From source
+
+You need Rust 1.89 or newer (`rustc --version`). On Ubuntu 26.04 and later
+the packaged version is new enough (`sudo apt install rustc cargo`);
+otherwise install it from [rustup.rs](https://rustup.rs).
 
 ```
 git clone https://github.com/neddyP/encryptor.git
@@ -221,3 +230,27 @@ All the code is in `src/main.rs`. It uses the RustCrypto
 [`zeroize`](https://crates.io/crates/zeroize) for wiping secrets,
 [`getrandom`](https://crates.io/crates/getrandom) for randomness and
 [`rpassword`](https://crates.io/crates/rpassword) for hidden input.
+
+## Releasing
+
+Releases are built and published by `.github/workflows/release.yml`:
+
+1. Set the new version in both `Cargo.toml` and `npm/package.json`.
+2. Commit, then tag and push:
+
+   ```
+   git tag v0.2.0
+   git push origin master v0.2.0
+   ```
+
+The workflow tests and builds static Linux binaries (x64 and arm64) and macOS
+binaries (x64 and arm64), packs them into the npm package and publishes it
+using npm trusted publishing, so no npm token is stored in the repo. It stops
+if the tag and the two version numbers don't all match.
+
+Running the workflow by hand from the Actions tab does everything except the
+publish and keeps the packed tarball as the `npm-package` artifact.
+
+The npm package lives in `npm/`. `bin/*.js` are small Node launchers that run
+the right binary from `vendor/<platform>/aes256`, which `npm/stage.sh` fills
+in from the build artifacts.

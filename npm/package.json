@@ -1,0 +1,38 @@
+{
+  "name": "@neddyp/encryptor",
+  "version": "0.1.0",
+  "description": "Encrypt and decrypt files with AES-256-GCM from the command line",
+  "keywords": [
+    "encryption",
+    "decryption",
+    "aes",
+    "aes-256-gcm",
+    "cli",
+    "encrypt",
+    "decrypt"
+  ],
+  "license": "UNLICENSED",
+  "bin": {
+    "encrypt": "bin/encrypt.js",
+    "decrypt": "bin/decrypt.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "vendor"
+  ],
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

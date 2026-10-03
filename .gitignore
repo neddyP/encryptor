@@ -1,2 +1,5 @@
 /target
 *.key
+*.tgz
+/npm/vendor/
+/npm/README.md

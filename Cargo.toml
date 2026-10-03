@@ -2,6 +2,7 @@
 name = "aes256"
 version = "0.1.0"
 edition = "2024"
+description = "Encrypt and decrypt files with AES-256-GCM from the command line"
 
 [dependencies]
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }
@@ -10,3 +11,7 @@ hex = "0.4.3"
 rpassword = "7.5.4"
 sha2 = "0.11.0"
 zeroize = "1.9.0"
+
+[profile.release]
+lto = true
+strip = true
