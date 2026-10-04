@@ -35,8 +35,10 @@ See [Install](#install) for details, including permission errors.
   finds one, it names it, with its PID and the file it writes to, warns that
   printing would compromise the encryption, and asks whether to print anyway.
 - **Verified before anything is deleted.** After encrypting, the new file is
-  read back from disk and decrypted, and its SHA-256 is compared with the
-  original. The original is deleted only if they match.
+  flushed to disk and read back from the disk itself, not from the copy the
+  system keeps in memory, then decrypted, and its SHA-256 is compared with
+  the original. The original is deleted only if they match. Decrypted files
+  are checked the same way.
 - **Original overwritten, then deleted.** The plaintext file is overwritten
   with zeros and flushed to disk, renamed to random characters so its name
   doesn't linger either, then removed. It is opened once and handled through
@@ -46,9 +48,9 @@ See [Install](#install) for details, including permission errors.
   (never swapped out) and zeroed as soon as they're no longer needed. Core
   dumps are disabled, and on Linux other programs running as you can't read
   the tool's memory.
-- **Nothing left on disk.** Unused key files, partial output and output that
-  fails verification are overwritten with zeros before they're deleted. The
-  tool writes no logs.
+- **Nothing left on disk.** Unused key files, partial output, output that
+  fails verification, and a file that decrypting replaces are overwritten
+  with zeros before they're deleted. The tool writes no logs.
 - **Keys scrubbed from shell history.** Whenever a key is used, any copy of it
   in your bash, zsh or fish history files is overwritten with asterisks, in
   case it was ever typed or pasted into a command.
@@ -57,7 +59,13 @@ See [Install](#install) for details, including permission errors.
   for good.
 - **Safe to interrupt.** Ctrl-C at any point stops cleanly: keys are wiped,
   unused key files and partial output are shredded, and the original is left
-  untouched unless encryption had already been verified.
+  untouched unless encryption had already been verified. Shredding a large
+  partial file shows its progress.
+- **Files of any size, in a few megabytes of memory.** Files are encrypted
+  in 64 KiB chunks, each authenticated on its own, so even files far larger
+  than the computer's memory are handled with only one chunk in memory at a
+  time, and plaintext never leaves locked RAM. Large files show their
+  progress.
 - **Metadata comes back too.** Permissions, timestamps, owner and extended
   attributes (which hold ACLs on Linux, and Finder tags and download
   quarantine on macOS) are stored inside the encryption, so they don't leak,
@@ -83,11 +91,15 @@ so you don't need Rust.
 npm install -g @neddyp/encryptor
 ```
 
-That puts `encrypt`, `decrypt` and `aes256` on your `PATH`. Check it worked:
+That puts `encrypt`, `decrypt` and `encryptor` on your `PATH`. Check it
+worked:
 
 ```
-encrypt --help
+encryptor --help
 ```
+
+`aes256`, the old name for `encryptor`, still works until 3.0, with a note
+saying so.
 
 **Permission denied (`EACCES`)?** On Linux with Node from your distribution's
 packages, global installs go into `/usr/local`, which needs root. Either
@@ -133,7 +145,7 @@ cargo build --release
 ```
 
 Then put the repo's `bin/` folder on your `PATH` so `encrypt`, `decrypt` and
-`aes256` work from any directory. Add this to `~/.bashrc`, adjusting the path to where
+`encryptor` work from any directory. Add this to `~/.bashrc`, adjusting the path to where
 you cloned the repo:
 
 ```bash
@@ -142,8 +154,9 @@ export PATH="$HOME/encryptor/bin:$PATH"
 
 Reload with `source ~/.bashrc` and check with `type encrypt`.
 
-`bin/encrypt`, `bin/decrypt` and `bin/aes256` are symlinks to
-`target/release/aes256`, so rebuilding updates them automatically. After a
+`bin/encrypt`, `bin/decrypt` and `bin/encryptor` (and `bin/aes256`, its old
+name) are symlinks to `target/release/encryptor`, so rebuilding updates them
+automatically. After a
 `cargo clean`, run `cargo build --release` again to bring them back.
 
 If you also have the npm package installed, whichever `encrypt` comes first
@@ -152,14 +165,38 @@ on your `PATH` is the one that runs. `type -a encrypt` lists them all.
 ## Usage
 
 ```
-encrypt [FILE]    encrypt FILE to FILE.enc, then delete FILE
-decrypt [FILE]    decrypt FILE.enc back to FILE
-aes256            choose encrypt or decrypt interactively
+encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
+decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
+encryptor                      show the home screen, to encrypt or decrypt
 ```
 
+`encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as
+`encrypt` and `decrypt`. Each option answers one of the questions in
+advance, so it isn't asked:
+
+| Option                | What it does                                                        |
+| --------------------- | ------------------------------------------------------------------- |
+| `-k`, `--key-file KEY` | Use the key in `KEY`: 32 bytes, or 64 hex characters. It can be a pipe |
+| `--new-key PATH`      | Encrypt with a new key, saved to `PATH`, or into `PATH` if it's a folder |
+| `--keep`              | Encrypt, but keep the original instead of deleting it               |
+| `-o`, `--output PATH` | Decrypt to `PATH` instead of next to the encrypted file            |
+| `--overwrite`         | Decrypt over the output file if it already exists                   |
+| `-y`, `--yes`         | Don't ask to confirm encrypting or decrypting                       |
+| `-q`, `--quiet`       | Don't print the report                                              |
+| `-h`, `--help`        | Show the usage                                                      |
+| `-V`, `--version`     | Show the version and the file formats it reads                      |
+
+Run on its own in a terminal, `encryptor` shows a home screen: its name in
+large letters, the version and this help. Press `e` to encrypt a file, `d` to
+decrypt one, or `q` to quit; the arrow keys scroll if it doesn't all fit.
+Without a terminal it asks "Encrypt or decrypt?" instead.
+
 If you leave out `FILE`, you're asked for it. Typed paths may be quoted or
-start with `~/`, so you can drag a file into the terminal. `encrypt --help`
-prints the usage.
+start with `~/`, so you can drag a file into the terminal.
+
+Questions, warnings and errors go to standard error, and only the final
+report to standard output, so `encrypt report.pdf > report.txt` still shows
+every question and saves just the report.
 
 `encrypt` takes one file at a time. To encrypt a folder or several files, zip
 them into a single file first. Given a folder or more than one file, `encrypt`
@@ -197,11 +234,11 @@ Encrypt using AES-256-GCM? [y/n]: y
   Cipher         AES-256-GCM (authenticated encryption)
   Key            256-bit, generated by the OS CSPRNG
   Key storage    saved to /home/you/Documents/report.pdf.key (owner read/write only)
-  Nonce          96-bit, random
-  Auth tag       128-bit
+  File key       derived with HKDF-SHA256 from the key and a random 256-bit salt
+  Chunks         20 of up to 64 KiB, each with its own 128-bit auth tag
   Input          report.pdf  1258291 bytes (1.2 MiB)
-  Output         report.pdf.enc  1258401 bytes (1.2 MiB)
-  Overhead       110 bytes (17 header + 77 metadata + 16 tag)
+  Output         report.pdf.enc  1258725 bytes (1.2 MiB)
+  Overhead       434 bytes (37 header + 77 metadata + 320 in tags)
   Metadata       stored encrypted: permissions 644, owner 1000:1000, accessed, modified and created times
   Integrity      verified: re-read from disk, decrypted, SHA-256 matches original
   Original       overwritten with zeros, name scrambled, then deleted
@@ -284,7 +321,7 @@ Decrypt using AES-256-GCM? [y/n]: y
   Cipher         AES-256-GCM (authenticated encryption)
   Key            256-bit
   Auth tag       128-bit, valid: file is authentic and uncorrupted
-  Input          report.pdf.enc  1258401 bytes (1.2 MiB) (kept)
+  Input          report.pdf.enc  1258725 bytes (1.2 MiB) (kept)
   Output         report.pdf  1258291 bytes (1.2 MiB)
   Integrity      verified: re-read from disk, SHA-256 matches decrypted data
   Metadata       restored permissions 644, accessed and modified times; not restored: created time (this system can't set it)
@@ -300,7 +337,10 @@ attempts.
 
 The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
-overwritten. The encrypted file is kept.
+overwritten, and the old file is then overwritten with zeros, as it is often
+plaintext from an earlier decryption. If other hard links lead to it, it is
+left as they see it instead, and the report says so. The encrypted file is
+kept.
 
 The decrypted file gets the original's metadata back, and the report lists
 anything that couldn't be restored:
@@ -336,35 +376,76 @@ Nothing was written.
 
 ### Scripting
 
-When standard input isn't a terminal, answers and keys are read line by line
-from it. The key is then read as plain text, so use this only where that's
-acceptable. Prefer passing the path to a key file, as here:
+In scripts, give options rather than answers, so nothing is asked:
 
 ```
-printf 'report.pdf.key\ny\n' | decrypt report.pdf.enc
+encrypt report.pdf --new-key ~/keys/ --yes                 # new key saved as ~/keys/report.pdf.key
+encrypt backup.tar --key-file ~/keys/backup.key --keep -y  # encrypt a copy, keep the original
+decrypt report.pdf.enc --key-file ~/keys/report.pdf.key --yes
+decrypt report.pdf.enc --key-file <(pass show keys/report) --yes   # key from a password manager
 ```
 
-Typing a hex key into a command like this puts it in your shell's history.
+Keys are never given on the command line itself, since every user can see
+command lines and the shell saves them in its history. `--key-file` takes a
+32-byte key file, or 64 hex characters as `encrypt` prints them, and can be a
+pipe, so a key from a password manager never touches the disk.
+
+The exit status says what happened:
+
+| Status | Meaning                                                  |
+| ------ | -------------------------------------------------------- |
+| 0      | Success                                                  |
+| 2      | Bad options, or a question a script must answer with one |
+| 3      | Wrong key, or the encrypted file is damaged              |
+| 4      | A file problem: missing, no permission, disk full        |
+| 1      | Anything else                                            |
+| 130    | Interrupted                                              |
+
+Answers piped into standard input still work, read line by line in the order
+the questions are asked, but print a note, and stop working in 3.0. Which
+questions get asked depends on things a script can't see, such as whether the
+output already exists, so answers can land on the wrong question. Two
+questions are therefore never answered from a pipe:
+
+- **Replacing an existing file** needs `--overwrite`. Without it, a script
+  stops with status 2 before giving the key.
+- **Printing a key while something records the session** is refused when no
+  one is at the keyboard. `yes | encrypt` can't agree to it.
+
+A hex key piped in or typed into a command ends up in your shell's history.
 The tool overwrites it in your history files the next time that key is used,
 but it can't reach the copy the running shell holds in memory, which is saved
 when the shell exits. If you've done this, run `history -c` in that shell.
-Printing a key isn't possible without an interactive terminal.
 
 ## File format
 
 | Offset | Size | Contents                                  |
 | ------ | ---- | ----------------------------------------- |
 | 0      | 4    | Magic bytes `AGCM`                        |
-| 4      | 1    | Format version (`2`)                      |
-| 5      | 12   | Nonce, random per file                    |
-| 17     | n    | Ciphertext (same length as the plaintext) |
-| 17 + n | 16   | GCM authentication tag                    |
+| 4      | 1    | Format version (`3`)                      |
+| 5      | 32   | Salt, random per file                     |
+| 37     |      | Chunks, one after another                 |
 
-The 17-byte header is passed to GCM as associated data, so it is
-authenticated along with the ciphertext.
+The plaintext is split into chunks of 64 KiB, and only the last may be
+shorter. Each is encrypted with AES-256-GCM and followed by its 16-byte tag,
+so a full chunk takes 65,552 bytes on disk.
 
-The plaintext starts with the original file's metadata, so it is encrypted
-and authenticated along with the contents:
+- **Key.** Each file has its own AES key, derived from your key and the salt
+  with HKDF-SHA256 (info `encryptor v3 file key`). So no two files share a
+  key, even when you reuse yours.
+- **Nonces.** Chunk *n* (counting from 0) uses the 12-byte nonce made of *n*
+  as an 11-byte big-endian number, then `1` for the last chunk or `0` for any
+  other.
+- **Associated data.** The 37-byte header is the associated data of every
+  chunk, so it is authenticated too.
+
+Changing any byte, reordering, dropping or adding chunks, or cutting the file
+short makes decryption fail. If the first chunk decrypts but a later one
+doesn't, the key is right and the file is damaged from that chunk on, and the
+error says where.
+
+The plaintext, all the chunks in order, starts with the original file's
+metadata, so it is encrypted and authenticated along with the contents:
 
 | Size | Contents                                  |
 | ---- | ----------------------------------------- |
@@ -384,24 +465,45 @@ little-endian. Records with unknown tags are skipped.
 | 5   | Creation time, as for tag 3                                   |
 | 6   | Extended attribute: name, a zero byte, then the value         |
 
-Version 1 files, made by versions of encryptor before 2.0, have no metadata:
-the plaintext is just the contents. 2.0 and later read both, but earlier
-versions can't read version 2.
-
-The format is plain AES-256-GCM and can be decrypted by any standard
-implementation. For example, with Python's `cryptography` package:
+The format uses only standard primitives, so any AES-GCM and HKDF
+implementation can decrypt it. For example, with Python's `cryptography`
+package:
 
 ```python
-import struct
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-blob = open("report.pdf.enc", "rb").read()
+CHUNK = 64 * 1024 + 16  # 64 KiB of ciphertext, then its 16-byte tag
+
 key = open("report.pdf.key", "rb").read()
-plaintext = AESGCM(key).decrypt(blob[5:17], blob[17:], blob[:17])
-if blob[4] >= 2:  # skip the metadata
-    (length,) = struct.unpack_from("<I", plaintext)
-    plaintext = plaintext[4 + length:]
+with open("report.pdf.enc", "rb") as f:
+    header = f.read(37)
+    body = f.read()  # for a large file, decrypt as you read instead
+aead = AESGCM(HKDF(hashes.SHA256(), 32, header[5:37], b"encryptor v3 file key").derive(key))
+chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)]
+plaintext = b"".join(
+    aead.decrypt(bytes(3) + n.to_bytes(8, "big") + bytes([n == len(chunks) - 1]), chunk, header)
+    for n, chunk in enumerate(chunks)
+)
+length = int.from_bytes(plaintext[:4], "little")  # skip the metadata
+contents = plaintext[4 + length:]
 ```
+
+### Earlier formats
+
+This version still decrypts files from earlier versions, which encrypted the
+whole file in one piece, so decrypting them needs free memory the size of the
+file. Earlier versions can't read version 3 files; they say so, and how to
+update.
+
+| Version | Made by     | Layout                                                    |
+| ------- | ----------- | --------------------------------------------------------- |
+| 2       | 2.0         | `AGCM`, `2`, 12-byte random nonce, ciphertext, 16-byte tag |
+| 1       | before 2.0  | The same, with version `1` and no metadata                 |
+
+In both, the 17-byte header is the associated data. Version 2's plaintext
+starts with the metadata, as above; version 1's is just the contents.
 
 ## Security notes
 
@@ -411,17 +513,12 @@ if blob[4] >= 2:  # skip the metadata
   filesystems (btrfs, ZFS) and backups can keep old copies of the original,
   and of history lines and files the tool overwrites. Full-disk encryption is
   the reliable protection for those.
-- **Large files can reach swap.** Keys are always locked in RAM, but the
-  system's memory-lock limit (often 8 MiB) caps how much plaintext can be.
-  The report says which applied. Encrypted swap, or no swap, covers the rest.
 - **Not every recorder can be detected.** Terminal emulator session logs
   (such as iTerm2's automatic logging), recorders on the machine you
   connected from over SSH, sudo I/O logs and kernel keystroke auditing
   (`pam_tty_audit`) can't be seen from inside the session, and would capture
   a printed key. Save the key instead of printing it when a session might be
   recorded.
-- **Whole files are processed in memory.** You need free RAM at least the size
-  of the file. AES-GCM limits a single file to 64 GiB.
 - **Keys are raw 256-bit values, not passwords.** There's no password-based
   key derivation, so use generated keys rather than typing in something
   memorable.
@@ -431,8 +528,8 @@ if blob[4] >= 2:  # skip the metadata
   it if the original did. Symlinks are rejected as input, so the tool never
   overwrites the file a link points to.
 - **Metadata is encrypted, but the size isn't.** An encrypted file is the
-  original's size plus 33 bytes plus the metadata, and its name is the
-  original's with `.enc` added.
+  original's size plus 37 bytes, 16 bytes per 64 KiB, and the metadata, and
+  its name is the original's with `.enc` added.
 - `.gitignore` excludes `*.key`, so key files saved inside the repo can't be
   committed by accident.
 
@@ -442,20 +539,41 @@ if blob[4] >= 2:  # skip the metadata
 cargo test --release
 ```
 
-The tests cover round trips at several sizes, wrong-key rejection, detection
-of a change to any single byte, truncation, nonce uniqueness, key parsing,
+The tests cover round trips at sizes around the chunk boundaries, wrong-key
+rejection, detection of a change to any chunk, of chunks reordered, added or
+cut off, and of truncation, a known-answer test against a file made by
+another implementation, decrypting the earlier formats, key parsing,
 overwriting and deleting files (including when a file is swapped for a
 symlink part way through), history redaction, escaping of untrusted file
 names, recognising recorders and the files they write to, storing and restoring
 metadata (including reading files from earlier versions), and the advice in
-error messages.
+error messages. `tests/cli.rs` runs the program itself as a script would, with
+its options, and checks its exit status and the files it leaves.
 
-The code is in `src/`: `main.rs` has the commands and crypto, `protect.rs`
-the process hardening and memory locking, `term.rs` the terminal input and
-output, `recording.rs` the search for anything recording the session,
-`meta.rs` the stored metadata, `explain.rs` the error messages, and `wipe.rs`
-secure deletion and history redaction. It uses the
-RustCrypto [`aes-gcm`](https://crates.io/crates/aes-gcm) and
+The code is in `src/`:
+
+| File           | What it does                                                         |
+| -------------- | -------------------------------------------------------------------- |
+| `main.rs`      | Starting up, `--help` and `--version`                                |
+| `cli.rs`       | The command line and its options                                     |
+| `encrypt.rs`   | The encrypt command and its report                                   |
+| `decrypt.rs`   | The decrypt command and its report                                   |
+| `keys.rs`      | Generating, saving, printing and entering keys; history scrubbing    |
+| `stream.rs`    | Chunked encryption, format version 3                                 |
+| `legacy.rs`    | Decrypting format versions 1 and 2                                   |
+| `meta.rs`      | The stored metadata                                                  |
+| `files.rs`     | Checking input, reading back from disk, writing output safely        |
+| `wipe.rs`      | Secure deletion and history redaction                                |
+| `term.rs`      | Terminal input and output, prompts, progress                         |
+| `recording.rs` | Finding anything recording the session                               |
+| `explain.rs`   | Error messages and their fixes                                       |
+| `error.rs`     | The error type                                                       |
+| `protect.rs`   | Process hardening, memory locking, interrupts                        |
+| `report.rs`    | The report printed on success                                        |
+
+It uses the RustCrypto
+[`aes-gcm`](https://crates.io/crates/aes-gcm),
+[`hkdf`](https://crates.io/crates/hkdf) and
 [`sha2`](https://crates.io/crates/sha2) crates,
 [`zeroize`](https://crates.io/crates/zeroize) for wiping secrets,
 [`getrandom`](https://crates.io/crates/getrandom) for randomness and
@@ -490,8 +608,9 @@ Every run keeps the packed tarball as the `npm-package` artifact. The
 decision logic is in `.github/release-plan.sh`.
 
 The npm package lives in `npm/`. `bin/*.js` are small Node launchers that run
-the right binary from `vendor/<platform>/aes256`, which `npm/stage.sh` fills
-in from the build artifacts.
+the binary for the platform, `vendor/<platform>/encryptor`, under their own
+name, which tells it what to do. `npm/stage.sh` fills `vendor/` in from the
+build artifacts.
 
 ## License
 

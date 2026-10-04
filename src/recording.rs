@@ -488,7 +488,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn sees_what_a_process_writes_to() {
-        let dir = std::env::temp_dir().join(format!("aes256-recording-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("encryptor-recording-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("session.log");
         let sleep = |stdout: Stdio| {

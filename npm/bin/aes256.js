@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-require("../lib/run.js")();
+require("../lib/run.js")("aes256");

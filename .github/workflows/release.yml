@@ -82,10 +82,10 @@ jobs:
             rm -rf target/release
             cross test --release --locked --target "$target"
             cross build --release --locked --target "$target"
-            cp "target/$target/release/aes256" "out/aes256-$platform"
+            cp "target/$target/release/encryptor" "out/encryptor-$platform"
           done
           file out/*
-          out/aes256-linux-x64 --help
+          out/encryptor-linux-x64 --help
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-linux
@@ -113,10 +113,10 @@ jobs:
           for pair in aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-x64; do
             target=${pair%%:*} platform=${pair##*:}
             cargo build --release --locked --target "$target"
-            cp "target/$target/release/aes256" "out/aes256-$platform"
+            cp "target/$target/release/encryptor" "out/encryptor-$platform"
           done
           file out/*
-          if [ "$(uname -m)" = arm64 ]; then out/aes256-darwin-arm64 --help; else out/aes256-darwin-x64 --help; fi
+          if [ "$(uname -m)" = arm64 ]; then out/encryptor-darwin-arm64 --help; else out/encryptor-darwin-x64 --help; fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-macos

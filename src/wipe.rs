@@ -2,7 +2,7 @@
 //! redacting keys from shell history files.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -43,20 +43,20 @@ impl Original {
         &self.file
     }
 
-    pub fn len(&self) -> io::Result<u64> {
-        Ok(self.file.metadata()?.len())
-    }
-
-    pub fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+    /// The open file, ready to be read from the start.
+    pub fn reader(&mut self) -> io::Result<&File> {
         self.file.seek(SeekFrom::Start(0))?;
-        self.file.read_exact(buf)
+        Ok(&self.file)
     }
 
     /// Overwrites the contents with zeros through the open handle, then
     /// deletes the name, but only if it still refers to this same file.
     /// Describes what happened, for the report.
     pub fn destroy(mut self, path: &Path) -> String {
-        let zeroed = self.writable && zero_fill(&mut self.file).is_ok();
+        let size = self.file.metadata().map_or(0, |meta| meta.len());
+        let mut progress = crate::term::Progress::new("Shredding the original", size);
+        let zeroed = self.writable && zero_fill(&mut self.file, &mut |done| progress.update(done)).is_ok();
+        drop(progress);
         match remove_if_same(path, self.dev, self.ino) {
             Ok(()) if zeroed => "overwritten with zeros, name scrambled, then deleted".into(),
             Ok(()) => "name scrambled and deleted (read-only, so not overwritten)".into(),
@@ -71,24 +71,42 @@ impl Original {
 /// Overwrites a file this program created with zeros, then deletes it under a
 /// scrambled name. Used for unused key files and partial or rejected output.
 pub fn shred(path: &Path) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    shred_with_progress(path, &mut |_| {})
+}
+
+/// `shred`, telling `progress` how many bytes have been overwritten.
+pub fn shred_with_progress(path: &Path, progress: &mut impl FnMut(u64)) -> io::Result<()> {
+    let (mut file, meta) = open_for_overwrite(path)?;
+    zero_fill(&mut file, progress)?;
+    remove_if_same(path, meta.dev(), meta.ino())
+}
+
+/// Overwrites a file with zeros but leaves it in place, for a file about to
+/// be replaced.
+pub fn zero(path: &Path) -> io::Result<()> {
+    zero_fill(&mut open_for_overwrite(path)?.0, &mut |_| {})
+}
+
+fn open_for_overwrite(path: &Path) -> io::Result<(File, fs::Metadata)> {
+    let file = OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(io::Error::other("not a regular file"));
     }
-    zero_fill(&mut file)?;
-    remove_if_same(path, meta.dev(), meta.ino())
+    Ok((file, meta))
 }
 
 /// Overwrites a file's contents with zeros in place and flushes them to disk.
-fn zero_fill(file: &mut File) -> io::Result<()> {
+fn zero_fill(file: &mut File, progress: &mut impl FnMut(u64)) -> io::Result<()> {
     let zeros = vec![0u8; 1 << 16];
-    let mut remaining = file.metadata()?.len();
+    let len = file.metadata()?.len();
     file.seek(SeekFrom::Start(0))?;
-    while remaining > 0 {
-        let n = remaining.min(zeros.len() as u64) as usize;
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(zeros.len() as u64) as usize;
         file.write_all(&zeros[..n])?;
-        remaining -= n as u64;
+        done += n as u64;
+        progress(done);
     }
     file.sync_all()
 }
@@ -180,7 +198,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aes256-wipe-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("encryptor-wipe-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

@@ -9,7 +9,13 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
+use crate::error::Error;
+use crate::report::fmt_size;
+use crate::stream;
 use crate::term::{safe, safe_path};
+
+pub const AUTH_FAILED: &str =
+    "authentication failed: wrong key, or the file is corrupted or has been tampered with.";
 
 /// What was being done with a file when something went wrong.
 #[derive(Clone, Copy, PartialEq)]
@@ -100,7 +106,7 @@ pub fn missing(command: &str, path: &Path, e: &io::Error) -> String {
         return file(Action::Read, path, e);
     }
     let problem = format!("{} doesn't exist.", safe_path(path));
-    let encrypted = crate::with_suffix(path, ".enc");
+    let encrypted = crate::files::encrypted_path(path);
     if encrypted.is_file() {
         return match command {
             "decrypt" => format!("{problem}\nDid you mean the encrypted file?\n  decrypt {}", quote_path(&encrypted)),
@@ -218,7 +224,7 @@ pub fn unknown_command(arg: &str, usage: &str) -> String {
         return format!("'{}' is a file, not a command. To {command} it:\n  {command} {}", safe(arg), quote(arg));
     }
     if arg.starts_with('-') {
-        return format!("unknown option '{}'; the only option is --help.\n\n{usage}", safe(arg));
+        return format!("unknown option '{}'. These are the options:\n\n{usage}", safe(arg));
     }
     format!("unknown command '{}'. The commands are encrypt and decrypt.\n\n{usage}", safe(arg))
 }
@@ -242,21 +248,11 @@ pub fn output_exists(output: &Path) -> String {
     )
 }
 
-pub fn too_large(path: &Path, len: u64) -> String {
-    format!(
-        "{} is {}, but AES-GCM can encrypt at most 64 GiB at once.\nSplit it into parts, then encrypt each part:\n  split -b 32G {} {}",
-        safe_path(path),
-        crate::fmt_size(len as usize),
-        quote_path(path),
-        quote(&format!("{}.part-", path.to_string_lossy()))
-    )
-}
-
 pub fn no_memory(len: u64) -> String {
     format!(
         "there isn't enough free memory: the file needs {} of RAM.\n\
          Close other programs and try again, or use a computer with more memory.",
-        crate::fmt_size(len as usize)
+        fmt_size(len as usize)
     )
 }
 
@@ -319,10 +315,67 @@ pub fn not_encrypted(path: &Path, start: &[u8]) -> String {
     }
 }
 
-pub fn too_short(path: &Path, len: u64) -> String {
+pub fn too_short(path: &Path, len: u64, min: u64) -> String {
     format!(
-        "{} is only {len} bytes, too short to be an encrypted file (they're at least 33 bytes).\n\
+        "{} is only {len} bytes, too short to be an encrypted file (they're at least {min} bytes).\n\
          It has probably been cut short, for example by an interrupted download or copy. Try another copy.",
+        safe_path(path)
+    )
+}
+
+/// An encrypted file whose length doesn't fit the chunks it was written in.
+pub fn bad_length(path: &Path) -> String {
+    format!(
+        "{}'s length doesn't fit how it was encrypted: it was cut short, or something was added to its \
+         end.\nNothing was written. Try another copy of it.",
+        safe_path(path)
+    )
+}
+
+/// The start of an encrypted file decrypted, so the key is right, but the
+/// chunk at `offset` didn't.
+pub fn damaged_from(path: &Path, offset: u64) -> String {
+    format!(
+        "{} is damaged {} into the file. The key is right, as everything before that decrypted, but \
+         from there on the file was changed or cut short after it was encrypted.\nNothing was written. \
+         Try another copy of it.",
+        safe_path(path),
+        fmt_size(offset as usize)
+    )
+}
+
+pub fn random_failed(e: getrandom::Error) -> String {
+    format!(
+        "the operating system's random number generator failed: {e}.\nNothing was encrypted. \
+         Try again; if it keeps failing, restart the computer."
+    )
+}
+
+/// A failure part way through encrypting or decrypting `input` into `output`
+/// in chunks. `key_file` is the key file used to decrypt, if one was.
+pub fn stream_failure(e: stream::Error, input: &Path, output: &Path, key_file: Option<&Path>) -> Error {
+    match e {
+        stream::Error::Read(e) if e.kind() == io::ErrorKind::UnexpectedEof => Error::File(changed_while_reading(input)),
+        stream::Error::Read(e) => Error::File(file(Action::Read, input, &e)),
+        stream::Error::Write(e) => Error::File(file(Action::Write, output, &e)),
+        stream::Error::Auth(0) => Error::KeyOrData(wrong_key(input, key_file)),
+        stream::Error::Auth(n) => Error::KeyOrData(damaged_from(
+            input,
+            stream::HEADER_LEN as u64 + n * (stream::CHUNK + stream::TAG_LEN) as u64,
+        )),
+        stream::Error::Truncated => Error::KeyOrData(bad_length(input)),
+        stream::Error::Metadata(e) => Error::KeyOrData(e),
+        stream::Error::Memory(len) => no_memory(len).into(),
+        stream::Error::Random(e) => random_failed(e).into(),
+        stream::Error::Interrupted => Error::Interrupted,
+    }
+}
+
+/// A file that changed while it was being read.
+pub fn changed_while_reading(path: &Path) -> String {
+    format!(
+        "{} changed while it was being read, so something else is writing to it.\nNothing was deleted \
+         or replaced. Try again once nothing else is using the file.",
         safe_path(path)
     )
 }
@@ -342,10 +395,10 @@ pub fn unsupported_version(version: u8) -> String {
 /// Decryption failed to authenticate: the key is wrong or the file changed.
 /// `key_file` is the key file used, if one was.
 pub fn wrong_key(input: &Path, key_file: Option<&Path>) -> String {
-    let plain = crate::decrypted_path(input);
+    let plain = crate::files::decrypted_path(input);
     let plain_name = plain.file_name().unwrap_or_default().to_string_lossy();
     let expected = format!("{plain_name}.key");
-    let mut message = format!("{}\nNothing was written.", crate::AUTH_FAILED);
+    let mut message = format!("{AUTH_FAILED}\nNothing was written.");
     if let Some(used) = key_file {
         let name = used.file_name().unwrap_or_default().to_string_lossy();
         if !(name.starts_with(&format!("{plain_name}.")) && name.ends_with(".key")) {
@@ -444,16 +497,22 @@ pub fn key_file_size(path: &Path, size: u64) -> String {
         );
     }
     match size {
-        0 => format!("{shown} is empty, so it isn't a key file. Key files are exactly 32 bytes."),
-        64..=66 => format!(
-            "{shown} is {size} bytes, which looks like a key written out as 64 hex characters rather than \
-             a key file. Paste what's in it here instead."
-        ),
+        0 => format!("{shown} is empty, so it isn't a key file. Key files hold 32 bytes, or 64 hex characters."),
         _ => format!(
-            "{shown} is {size} bytes, but key files are exactly 32 bytes. Check it's the .key file saved \
-             when the file was encrypted."
+            "{shown} is {size} bytes, but key files hold exactly 32 bytes, or 64 hex characters. Check it's \
+             the .key file saved when the file was encrypted."
         ),
     }
+}
+
+/// A decrypted file that would replace one already there, in a script.
+pub fn needs_overwrite(output: &Path) -> String {
+    format!(
+        "{} already exists. Add --overwrite to replace it, or --output to write somewhere else.\n\
+         Replacing a file is never agreed to through a pipe, since the answer could be meant for \
+         another question.",
+        safe_path(output)
+    )
 }
 
 pub fn key_file_folder(path: &Path) -> String {
@@ -515,7 +574,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aes256-explain-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("encryptor-explain-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -606,7 +665,7 @@ mod tests {
         assert!(hex_key_length(128).contains("pasted twice"));
         assert!(hex_key_length(70).contains("That's 6 too many"));
         assert!(key_file_size(Path::new("report.pdf.enc"), 1000).contains("usually report.pdf.key"));
-        assert!(key_file_size(Path::new("k.txt"), 65).contains("written out as 64 hex characters"));
+        assert!(key_file_size(Path::new("k.txt"), 65).contains("or 64 hex characters"));
         assert!(key_file_size(Path::new("k.key"), 0).contains("is empty"));
     }
 
@@ -617,7 +676,7 @@ mod tests {
         fs::write(&file, b"x").unwrap();
         let named = unknown_command(file.to_str().unwrap(), "USAGE");
         assert!(named.contains("is a file, not a command") && named.contains("decrypt "), "{named}");
-        assert!(unknown_command("--force", "USAGE").starts_with("unknown option '--force'"));
+        assert!(unknown_command("--force", "USAGE").starts_with("unknown option '--force'. These are the options"));
         assert!(unknown_command("crypt", "USAGE").starts_with("unknown command 'crypt'"));
         fs::remove_dir_all(&dir).unwrap();
 

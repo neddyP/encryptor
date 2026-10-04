@@ -4,8 +4,8 @@
 #
 #   npm/stage.sh <binaries-dir>
 #
-# <binaries-dir> must hold aes256-linux-x64, aes256-linux-arm64,
-# aes256-darwin-x64 and aes256-darwin-arm64.
+# <binaries-dir> must hold encryptor-linux-x64, encryptor-linux-arm64,
+# encryptor-darwin-x64 and encryptor-darwin-arm64.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -22,8 +22,8 @@ fi
 rm -rf "$here/vendor"
 for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
   mkdir -p "$here/vendor/$platform"
-  cp "$src/aes256-$platform" "$here/vendor/$platform/aes256"
-  chmod 755 "$here/vendor/$platform/aes256"
+  cp "$src/encryptor-$platform" "$here/vendor/$platform/encryptor"
+  chmod 755 "$here/vendor/$platform/encryptor"
 done
 cp "$root/README.md" "$root/LICENSE" "$here/"
 echo "staged @neddyp/encryptor $npm_version"

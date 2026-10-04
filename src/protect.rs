@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const INTERRUPTED: &str = "interrupted";
+use crate::error::{Error, Result};
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LOCK_FAILED: AtomicBool = AtomicBool::new(false);
@@ -58,12 +58,8 @@ pub fn stop_requested() -> bool {
 }
 
 /// Fails if the user has asked to stop.
-pub fn check() -> Result<(), String> {
-    if stop_requested() {
-        Err(INTERRUPTED.into())
-    } else {
-        Ok(())
-    }
+pub fn check() -> Result<()> {
+    if stop_requested() { Err(Error::Interrupted) } else { Ok(()) }
 }
 
 /// Keeps `len` bytes at `ptr` in RAM so they are never written to swap. Large

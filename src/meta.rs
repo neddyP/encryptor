@@ -455,14 +455,14 @@ mod tests {
 
     #[test]
     fn restores_what_it_captured() {
-        let dir = std::env::temp_dir().join(format!("aes256-meta-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("encryptor-meta-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (from, to) = (dir.join("from"), dir.join("to"));
         std::fs::write(&from, b"x").unwrap();
         std::fs::write(&to, b"x").unwrap();
 
         let source = File::open(&from).unwrap();
-        let xattrs = xattr::set(&source, &CString::new("user.aes256-test").unwrap(), b"\0tag\xff").is_ok();
+        let xattrs = xattr::set(&source, &CString::new("user.encryptor-test").unwrap(), b"\0tag\xff").is_ok();
         source.set_permissions(Permissions::from_mode(0o751)).unwrap();
         let accessed = UNIX_EPOCH + Duration::new(1_000_000_000, 123_456_789);
         let modified = UNIX_EPOCH + Duration::new(1_234_567_890, 987_654_321);
@@ -491,7 +491,7 @@ mod tests {
         if unsafe { libc::geteuid() } == 0 {
             return; // root can give the file away, so there's nothing to drop
         }
-        let path = std::env::temp_dir().join(format!("aes256-setuid-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("encryptor-setuid-{}", std::process::id()));
         std::fs::write(&path, b"x").unwrap();
         let file = File::open(&path).unwrap();
         let me = file.metadata().unwrap();

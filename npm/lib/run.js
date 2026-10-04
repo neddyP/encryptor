@@ -1,7 +1,8 @@
 "use strict";
 
-// Runs the prebuilt aes256 binary for this platform with the user's arguments,
-// preceded by `command` (`encrypt` or `decrypt`) when one is given.
+// Runs the prebuilt encryptor binary for this platform with the user's
+// arguments, under `name`: encrypt, decrypt, encryptor or the old aes256. The
+// binary tells from its name what to do, as it does when run through a link.
 
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -9,9 +10,9 @@ const path = require("node:path");
 
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 
-module.exports = function run(command) {
+module.exports = function run(name) {
   const platform = `${process.platform}-${process.arch}`;
-  const binary = path.join(__dirname, "..", "vendor", platform, "aes256");
+  const binary = path.join(__dirname, "..", "vendor", platform, "encryptor");
   if (!fs.existsSync(binary)) {
     console.error(
       `encryptor: no binary for ${platform}. Supported: Linux and macOS on x64 and arm64.`
@@ -19,12 +20,7 @@ module.exports = function run(command) {
     process.exit(1);
   }
 
-  const args = process.argv.slice(2);
-  if (command) {
-    args.unshift(command);
-  }
-
-  const child = spawn(binary, args, { stdio: "inherit" });
+  const child = spawn(binary, process.argv.slice(2), { stdio: "inherit", argv0: name });
 
   // The binary handles Ctrl-C and similar signals itself, wiping keys and
   // removing partial files before it exits. Stay alive until it has, passing

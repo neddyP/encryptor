@@ -7,9 +7,12 @@ use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::error::{Error, Result};
 use crate::protect;
 
 /// Longest line accepted at a prompt. Line buffers are allocated at this size
@@ -19,12 +22,15 @@ const MAX_LINE: usize = 4096;
 /// Prints `prompt` and reads one line from standard input. Reads are
 /// unbuffered, so no copy of the line stays in a library buffer. Surrounding
 /// whitespace is removed.
-pub fn read_line(prompt: &str) -> Result<Zeroizing<String>, String> {
+pub fn read_line(prompt: &str) -> Result<Zeroizing<String>> {
+    if !io::stdin().is_terminal() {
+        note_piped_answers();
+    }
     show_prompt(prompt)?;
     let mut line = line_buffer();
     loop {
         match read_byte(libc::STDIN_FILENO)? {
-            None if line.is_empty() => return Err(input_ended()),
+            None if line.is_empty() => return Err(input_ended().into()),
             None | Some(b'\n') => break,
             Some(byte) => push(&mut line, byte)?,
         }
@@ -36,7 +42,7 @@ pub fn read_line(prompt: &str) -> Result<Zeroizing<String>, String> {
 /// Backspace, Ctrl-U (clear) and Ctrl-C (cancel) work, and the prompt goes to
 /// standard error so it stays visible when standard output is redirected.
 /// Piped input is read as an ordinary line so the tool can be scripted.
-pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>, String> {
+pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
     if !io::stdin().is_terminal() {
         return read_line(prompt);
     }
@@ -50,9 +56,9 @@ pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>, String> {
                 Some(0x03) => {
                     protect::request_stop();
                     eprintln!();
-                    return Err(protect::INTERRUPTED.into());
+                    return Err(Error::Interrupted);
                 }
-                Some(0x04) if line.is_empty() => return Err(input_ended()),
+                Some(0x04) if line.is_empty() => return Err(input_ended().into()),
                 Some(0x7f | 0x08) => pop_char(&mut line),
                 Some(0x15) => line.clear(),
                 Some(0x1b) => skip_escape_sequence(libc::STDIN_FILENO)?,
@@ -76,7 +82,7 @@ pub enum Shown {
 /// Enter, then erases it and returns to the normal screen. Everything is
 /// written straight to the terminal device, so the key never goes through
 /// standard output and can't end up in a redirected file.
-pub fn show_key(key: &[u8; 32]) -> Result<Shown, String> {
+pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
     let term = std::env::var("TERM").unwrap_or_default();
     if term.is_empty() || term == "dumb" {
         return Ok(Shown::Unavailable("the terminal type (TERM) is unset or \"dumb\", so it couldn't be erased afterwards"));
@@ -101,12 +107,62 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown, String> {
                   cannot be decrypted.\r\n\r\nPress Enter to erase it from the screen.",
             )
         })
-        .map_err(|e| format!("cannot write to terminal: {e}"));
+        .map_err(|e| Error::from(format!("cannot write to terminal: {e}")));
     let result = shown.and_then(|()| wait_for_enter(fd));
     // Erase and leave the alternate screen even after an error or Ctrl-C.
     let _ = tty.write_all(b"\x1b[2J\x1b[3J\x1b[H\x1b[?1049l");
     drop(raw);
     result.map(|()| Shown::Yes)
+}
+
+/// A progress line on standard error for long jobs, shown only on a terminal
+/// and for large files, and cleared when dropped.
+pub struct Progress {
+    label: &'static str,
+    total: u64,
+    shown: bool,
+    last: Instant,
+}
+
+impl Progress {
+    pub fn new(label: &'static str, total: u64) -> Self {
+        let shown = total >= 64 << 20 && io::stderr().is_terminal();
+        Self { label, total, shown, last: Instant::now() }
+    }
+
+    /// Whether the line is being shown at all.
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+
+    pub fn update(&mut self, done: u64) {
+        if !self.shown || self.last.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.last = Instant::now();
+        eprint!("\r{} {:>3}% of {}\x1b[K", self.label, done * 100 / self.total, short_size(self.total));
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        if self.shown {
+            eprint!("\r\x1b[K");
+        }
+    }
+}
+
+fn short_size(bytes: u64) -> String {
+    let mut value = bytes as f64;
+    let mut unit = "bytes";
+    for next in ["KiB", "MiB", "GiB", "TiB"] {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next;
+    }
+    format!("{value:.1} {unit}")
 }
 
 /// Makes untrusted text such as file names safe to print: control characters
@@ -135,6 +191,16 @@ fn is_direction_control(c: char) -> bool {
     )
 }
 
+/// Says once that answering questions through a pipe is on its way out, in
+/// favour of options, which can't land on the wrong question.
+fn note_piped_answers() {
+    static NOTED: AtomicBool = AtomicBool::new(false);
+    if !NOTED.swap(true, Ordering::SeqCst) {
+        eprintln!("note: answering questions through a pipe stops working in 3.0. Use options instead,");
+        eprintln!("such as --key-file, --new-key and --yes; see encryptor --help.");
+    }
+}
+
 /// Input that ran out before a question was answered.
 fn input_ended() -> String {
     if io::stdin().is_terminal() {
@@ -146,9 +212,30 @@ fn input_ended() -> String {
     }
 }
 
-fn show_prompt(prompt: &str) -> Result<(), String> {
-    print!("{prompt}");
-    io::stdout().flush().map_err(|e| format!("cannot write to terminal: {e}"))
+/// Prompts and other conversation go to standard error, so redirecting
+/// standard output, where the report goes, doesn't hide them.
+fn show_prompt(prompt: &str) -> Result<()> {
+    eprint!("{prompt}");
+    io::stderr().flush().map_err(|e| format!("cannot write to terminal: {e}").into())
+}
+
+pub fn confirm(question: &str) -> Result<bool> {
+    Ok(choose(question, &["yes", "no"])? == "yes")
+}
+
+/// Asks until the answer is one of `options`, typed in full or as its first
+/// letter, and returns the chosen option.
+pub fn choose<'a>(question: &str, options: &[&'a str]) -> Result<&'a str> {
+    let letters: Vec<&str> = options.iter().map(|option| &option[..1]).collect();
+    let prompt = format!("{question} [{}]: ", letters.join("/"));
+    loop {
+        let answer = read_line(&prompt)?.to_ascii_lowercase();
+        let chosen = options.iter().copied().find(|option| answer == *option || answer == option[..1]);
+        if let Some(option) = chosen {
+            return Ok(option);
+        }
+        eprintln!("  please answer {}", letters.join(" or "));
+    }
 }
 
 fn line_buffer() -> Zeroizing<Vec<u8>> {
@@ -157,9 +244,9 @@ fn line_buffer() -> Zeroizing<Vec<u8>> {
     line
 }
 
-fn push(line: &mut Vec<u8>, byte: u8) -> Result<(), String> {
+fn push(line: &mut Vec<u8>, byte: u8) -> Result<()> {
     if line.len() == MAX_LINE {
-        return Err(format!("that line is over {MAX_LINE} bytes, the longest a path or answer can be"));
+        return Err(format!("that line is over {MAX_LINE} bytes, the longest a path or answer can be").into());
     }
     line.push(byte);
     Ok(())
@@ -171,21 +258,20 @@ fn pop_char(line: &mut Vec<u8>) {
 }
 
 /// Trims the line in place and turns it into a string without copying it.
-fn finish(mut line: Zeroizing<Vec<u8>>) -> Result<Zeroizing<String>, String> {
+fn finish(mut line: Zeroizing<Vec<u8>>) -> Result<Zeroizing<String>> {
     let end = line.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
     line.truncate(end);
     let start = line.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(end);
     line.drain(..start);
     String::from_utf8(std::mem::take(&mut *line)).map(Zeroizing::new).map_err(|e| {
         e.into_bytes().zeroize();
-        "that isn't valid UTF-8 text. If it's a file name with unusual characters, rename the file and try again"
-            .to_string()
+        Error::from("that isn't valid UTF-8 text. If it's a file name with unusual characters, rename the file and try again")
     })
 }
 
 /// Reads one byte from `fd`, or `None` at end of input. Fails if the user asks
 /// to stop while it waits.
-fn read_byte(fd: libc::c_int) -> Result<Option<u8>, String> {
+fn read_byte(fd: libc::c_int) -> Result<Option<u8>> {
     let mut byte = 0u8;
     loop {
         // A stop requested between prompts shouldn't wait for another key.
@@ -197,7 +283,7 @@ fn read_byte(fd: libc::c_int) -> Result<Option<u8>, String> {
             _ => {
                 let err = io::Error::last_os_error();
                 if err.kind() != io::ErrorKind::Interrupted {
-                    return Err(format!("cannot read input: {err}"));
+                    return Err(format!("cannot read input: {err}").into());
                 }
                 protect::check()?;
             }
@@ -206,7 +292,7 @@ fn read_byte(fd: libc::c_int) -> Result<Option<u8>, String> {
 }
 
 /// Discards the rest of an escape sequence such as an arrow key.
-fn skip_escape_sequence(fd: libc::c_int) -> Result<(), String> {
+fn skip_escape_sequence(fd: libc::c_int) -> Result<()> {
     if let Some(b'[' | b'O') = read_byte(fd)? {
         while let Some(byte) = read_byte(fd)? {
             if (0x40..=0x7e).contains(&byte) {
@@ -217,13 +303,13 @@ fn skip_escape_sequence(fd: libc::c_int) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_for_enter(fd: libc::c_int) -> Result<(), String> {
+fn wait_for_enter(fd: libc::c_int) -> Result<()> {
     loop {
         match read_byte(fd)? {
             Some(b'\r' | b'\n') => return Ok(()),
             Some(0x03) => {
                 protect::request_stop();
-                return Err(protect::INTERRUPTED.into());
+                return Err(Error::Interrupted);
             }
             None => return Err("the terminal closed before Enter was pressed".into()),
             Some(_) => {}
@@ -232,25 +318,25 @@ fn wait_for_enter(fd: libc::c_int) -> Result<(), String> {
 }
 
 /// Turns off echo, line editing and signal keys on a terminal until dropped.
-struct RawMode {
+pub struct RawMode {
     fd: libc::c_int,
     saved: libc::termios,
 }
 
 impl RawMode {
-    fn enter(fd: libc::c_int) -> Result<Self, String> {
+    pub fn enter(fd: libc::c_int) -> Result<Self> {
         // SAFETY: termios is plain data, filled in by tcgetattr before use.
         unsafe {
             let mut saved: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(fd, &mut saved) != 0 {
-                return Err(format!("cannot configure terminal: {}", io::Error::last_os_error()));
+                return Err(format!("cannot configure terminal: {}", io::Error::last_os_error()).into());
             }
             let mut raw = saved;
             raw.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN);
             raw.c_cc[libc::VMIN] = 1;
             raw.c_cc[libc::VTIME] = 0;
             if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
-                return Err(format!("cannot configure terminal: {}", io::Error::last_os_error()));
+                return Err(format!("cannot configure terminal: {}", io::Error::last_os_error()).into());
             }
             Ok(Self { fd, saved })
         }

@@ -35,7 +35,7 @@ finish() {
 
 set_version() {
   sed -i "0,/^version = \".*\"$/s//version = \"$1\"/" Cargo.toml
-  sed -i "/^name = \"aes256\"$/{n;s/^version = \".*\"$/version = \"$1\"/}" Cargo.lock
+  sed -i "/^name = \"encryptor\"$/{n;s/^version = \".*\"$/version = \"$1\"/}" Cargo.lock
   (cd npm && npm pkg set "version=$1")
 }
 
