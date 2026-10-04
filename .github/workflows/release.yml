@@ -12,6 +12,10 @@ name: Release
 #   Run by hand               build and pack, then `npm publish --dry-run`.
 #
 # The packed tarball is kept as the `npm-package` artifact.
+#
+# Everything that runs here is pinned: actions to full commit SHAs, Rust and
+# Node to exact versions, cross's build images to digests (Cross.toml), and
+# crates to Cargo.lock (--locked). Update them deliberately, not by drifting.
 
 on:
   schedule:
@@ -38,14 +42,16 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       ref: ${{ steps.plan.outputs.ref }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: plan
         run: .github/release-plan.sh
       - name: Push the release commit and tag
         if: github.event_name == 'schedule' && steps.plan.outputs.mode == 'publish'
-        run: git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/${{ steps.plan.outputs.ref }}"
+        env:
+          RELEASE_REF: ${{ steps.plan.outputs.ref }}
+        run: git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/$RELEASE_REF"
 
   build-linux:
     name: Build Linux (x64, arm64)
@@ -53,15 +59,19 @@ jobs:
     if: needs.plan.outputs.mode != 'skip'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master, 2026-10
         with:
-          tool: cross
+          toolchain: 1.99.0
+      - uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        with:
+          tool: cross@0.2.5
       # Static musl binaries run on any Linux distribution. The arm64 tests run
-      # under emulation inside cross's container. target/release holds build
+      # under emulation inside cross's container, using the pinned images in
+      # Cross.toml. target/release holds build
       # scripts compiled inside the previous target's container, which may not
       # run in the next one, so it's cleared between targets.
       - name: Test and build
@@ -70,13 +80,13 @@ jobs:
           for pair in x86_64-unknown-linux-musl:linux-x64 aarch64-unknown-linux-musl:linux-arm64; do
             target=${pair%%:*} platform=${pair##*:}
             rm -rf target/release
-            cross test --release --target "$target"
-            cross build --release --target "$target"
+            cross test --release --locked --target "$target"
+            cross build --release --locked --target "$target"
             cp "target/$target/release/aes256" "out/aes256-$platform"
           done
           file out/*
           out/aes256-linux-x64 --help
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-linux
           path: out/
@@ -88,24 +98,26 @@ jobs:
     if: needs.plan.outputs.mode != 'skip'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master, 2026-10
         with:
+          toolchain: 1.99.0
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Test and build
         run: |
-          cargo test --release
+          cargo test --release --locked
           mkdir -p out
           for pair in aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-x64; do
             target=${pair%%:*} platform=${pair##*:}
-            cargo build --release --target "$target"
+            cargo build --release --locked --target "$target"
             cp "target/$target/release/aes256" "out/aes256-$platform"
           done
           file out/*
           if [ "$(uname -m)" = arm64 ]; then out/aes256-darwin-arm64 --help; else out/aes256-darwin-x64 --help; fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-macos
           path: out/
@@ -120,17 +132,17 @@ jobs:
       contents: read
       id-token: write # npm trusted publishing (OIDC)
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.ref }}
-      - uses: actions/setup-node@v7
+          persist-credentials: false
+      # Node 24.21.0 ships npm 11.19.0; trusted publishing needs 11.5.1 or later.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
+          node-version: "24.21.0"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
-      - name: Update npm (trusted publishing needs 11.5.1 or later)
-        run: npm install -g npm@latest
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: bin-*
           merge-multiple: true
@@ -139,7 +151,7 @@ jobs:
         run: |
           npm/stage.sh binaries
           npm pack ./npm
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package
           path: neddyp-encryptor-*.tgz
