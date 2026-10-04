@@ -9,7 +9,10 @@
 #
 # By event:
 #   push (v* tag)       publish that version, unless npm already has it
-#   workflow_dispatch   dry run of the current commit
+#   workflow_dispatch   dry run of the current commit, as the next patch
+#                       version if this one is already on npm, as a monthly
+#                       run would. The jobs set it in their own copies with
+#                       set-version.sh; nothing is committed.
 #   schedule            if files that go into the package changed since the
 #                       newest v* tag, bump the patch version (unless it was
 #                       already raised by hand), commit and tag it locally,
@@ -33,10 +36,9 @@ finish() {
   exit 0
 }
 
-set_version() {
-  sed -i "0,/^version = \".*\"$/s//version = \"$1\"/" Cargo.toml
-  sed -i "/^name = \"encryptor\"$/{n;s/^version = \".*\"$/version = \"$1\"/}" Cargo.lock
-  (cd npm && npm pkg set "version=$1")
+next_patch() {
+  IFS=. read -r major minor patch <<< "$1"
+  echo "$major.$minor.$((patch + 1))"
 }
 
 version=$(cargo_version)
@@ -45,6 +47,10 @@ version=$(cargo_version)
 
 case "${GITHUB_EVENT_NAME:?}" in
   workflow_dispatch)
+    if published "$version"; then
+      notice "$PACKAGE@$version is already on npm; dry run as $(next_patch "$version")"
+      version=$(next_patch "$version")
+    fi
     finish dry-run "$version" "$(git rev-parse HEAD)"
     ;;
 
@@ -72,9 +78,8 @@ case "${GITHUB_EVENT_NAME:?}" in
     # Keep a version that was raised by hand and not yet released; otherwise
     # take the next patch version.
     if [ "v$version" = "$last" ] || published "$version"; then
-      IFS=. read -r major minor patch <<< "$version"
-      version="$major.$minor.$((patch + 1))"
-      set_version "$version"
+      version=$(next_patch "$version")
+      .github/set-version.sh "$version"
       git -c user.name="github-actions[bot]" \
           -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
           commit -q -m "Release v$version" -- Cargo.toml Cargo.lock npm/package.json
