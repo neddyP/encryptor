@@ -380,6 +380,46 @@ pub fn changed_while_reading(path: &Path) -> String {
     )
 }
 
+/// A file to encrypt that other names (hard links) also lead to.
+pub fn other_names(path: &Path, others: u64) -> String {
+    let names = if others == 1 { "1 other name".to_string() } else { format!("{others} other names") };
+    format!(
+        "{} has {names} (hard links) leading to the same contents. Deleting it wouldn't remove \
+         them, and overwriting it would leave them as files of zeros, so it wasn't encrypted.\n\
+         `find / -xdev -samefile {} 2>/dev/null` lists them. Delete the ones you don't need and \
+         encrypt again, or add --keep to encrypt it without deleting anything.",
+        safe_path(path),
+        quote_path(path)
+    )
+}
+
+/// A file to encrypt that couldn't be opened for overwriting afterwards.
+pub fn cant_overwrite(path: &Path, e: &io::Error) -> String {
+    let why = match e.raw_os_error() {
+        Some(libc::EACCES | libc::EPERM) => "you don't have permission to write to it".to_string(),
+        _ => e.to_string(),
+    };
+    format!(
+        "{} can't be overwritten after encrypting, as {why}, so its contents would stay on the disk. \
+         Nothing was encrypted.\nIf it's yours, `ls -lO` (macOS) or `lsattr` (Linux) shows whether \
+         it's locked. Otherwise ask its owner to encrypt it, or add --keep to encrypt it without \
+         deleting it.",
+        safe_path(path)
+    )
+}
+
+/// The original is on a filesystem that writes changes somewhere new, so
+/// overwriting it can't reach its old contents.
+pub fn copy_on_write(path: &Path, filesystem: &str) -> String {
+    format!(
+        "WARNING: {} is on {filesystem}, which writes changes to a new place on the disk instead of over \
+         the old data. Overwriting the original after encrypting it won't reach its contents, which stay \
+         on the disk until the space is reused, and in any snapshots. Full-disk encryption (FileVault or \
+         LUKS) keeps them unreadable without your password.",
+        safe_path(path)
+    )
+}
+
 pub fn unsupported_version(version: u8) -> String {
     if version > crate::VERSION {
         format!(

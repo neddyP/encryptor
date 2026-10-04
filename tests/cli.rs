@@ -49,6 +49,7 @@ impl Scratch {
             .env("HOME", &self.0)
             .env_remove("HISTFILE")
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CACHE_HOME")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -312,4 +313,98 @@ fn answers_to_its_names() {
     let run = dir.run_as(&link("decrypt"), &["x.txt.enc", "-k", "x.key", "-y", "-q"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(dir.read("x.txt"), b"x");
+}
+
+#[test]
+fn removes_the_key_and_runs_of_the_tool_from_shell_history() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("history");
+    dir.write("a.txt", b"a");
+    dir.write("a.key", &[0x5a; 32]);
+    let hex = "5A".repeat(32);
+    dir.write(
+        ".bash_history",
+        format!("ls\nencrypt old.txt\necho {hex}\n./target/release/encryptor --help\ncd /\n").as_bytes(),
+    );
+    dir.write(".zsh_history", b": 1700000000:0;decrypt b.enc\n: 1700000001:0;pwd\n");
+
+    let run = dir.run(&["encrypt", "a.txt", "--key-file", "a.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(
+        run.stdout().contains("removed 1 entry holding the key and 3 that ran this tool, from ~/.bash_history, ~/.zsh_history"),
+        "{}",
+        run.stdout()
+    );
+    assert_eq!(dir.read(".bash_history"), b"ls\ncd /\n");
+    assert_eq!(dir.read(".zsh_history"), b": 1700000001:0;pwd\n");
+
+    // So is a run that stops before a key is asked for.
+    dir.write(".bash_history", b"ls\nencrypt missing.txt\n");
+    assert_eq!(dir.run(&["encrypt", "missing.txt"], "").code(), 4);
+    assert_eq!(dir.read(".bash_history"), b"ls\n");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn removes_the_thumbnails_and_recent_entry_of_the_original() {
+    use md5::{Digest, Md5};
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("traces");
+    dir.write("photo.jpg", b"pixels");
+    let uri = format!("file://{}", dir.0.canonicalize().unwrap().join("photo.jpg").display());
+    let thumbnail = format!(".cache/thumbnails/large/{}.png", hex::encode(Md5::digest(uri.as_bytes())));
+    fs::create_dir_all(dir.path(".cache/thumbnails/large")).unwrap();
+    dir.write(&thumbnail, b"a small picture of photo.jpg");
+    fs::create_dir_all(dir.path(".local/share")).unwrap();
+    let recent = format!("<xbel>\n  <bookmark href=\"{uri}\" added=\"x\">\n  </bookmark>\n</xbel>\n");
+    dir.write(".local/share/recently-used.xbel", recent.as_bytes());
+
+    let run = dir.run(&["encrypt", "photo.jpg", "--new-key", "photo.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("removed 1 thumbnail and 1 recently used entry"), "{}", run.stdout());
+    assert!(!dir.exists(&thumbnail));
+    assert_eq!(dir.read(".local/share/recently-used.xbel"), b"<xbel>\n</xbel>\n");
+}
+
+#[test]
+fn refuses_a_file_with_other_names_before_asking_for_a_key() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("hard-link");
+    dir.write("a.txt", b"a");
+    fs::hard_link(dir.path("a.txt"), dir.path("b.txt")).unwrap();
+    let run = dir.run(&["encrypt", "a.txt"], "");
+    assert_eq!(run.code(), 4, "{}", run.stderr());
+    assert!(run.stderr().contains("has 1 other name"), "{}", run.stderr());
+    assert!(!run.stderr().contains('?'), "asked a question: {}", run.stderr());
+    assert!(!dir.exists("a.txt.enc"));
+    assert_eq!(dir.read("b.txt"), b"a");
+
+    let run = dir.run(&["encrypt", "a.txt", "--new-key", "a.key", "--keep", "-y", "-q"], "");
+    assert_eq!(run.code(), 0, "kept, it can be encrypted: {}", run.stderr());
+}
+
+#[test]
+fn overwrites_a_read_only_original() {
+    use std::os::unix::fs::PermissionsExt;
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("read-only");
+    dir.write("ro.txt", b"read only");
+    fs::set_permissions(dir.path("ro.txt"), fs::Permissions::from_mode(0o444)).unwrap();
+    let run = dir.run(&["encrypt", "ro.txt", "--new-key", "ro.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("overwritten with zeros"), "{}", run.stdout());
+    assert!(!dir.exists("ro.txt"));
+
+    let run = dir.run(&["decrypt", "ro.txt.enc", "-k", "ro.key", "-y", "-q"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(dir.read("ro.txt"), b"read only");
+    assert_eq!(fs::metadata(dir.path("ro.txt")).unwrap().permissions().mode() & 0o777, 0o444);
 }

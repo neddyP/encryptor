@@ -9,9 +9,9 @@ use crate::error::{Error, Result};
 use crate::explain::{self, Action};
 use crate::files::{self, PartFile, Replaced};
 use crate::keys;
-use crate::report::{fmt_size, print_report};
+use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe, safe_path};
-use crate::{MAGIC, VERSION, legacy, protect, stream, wipe};
+use crate::{MAGIC, VERSION, history, legacy, protect, stream, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("decrypt", file)?;
@@ -64,7 +64,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             keys::prompt(false, &give_up)?
         }
     };
-    let history = keys::scrub_history(&key);
+    let history = history::clean(Some(&key));
 
     if !options.yes && !confirm("Decrypt using AES-256-GCM?")? {
         eprintln!("Cancelled; nothing was decrypted.");
@@ -130,7 +130,8 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         Replaced::Shredded => "; the file it replaced was overwritten with zeros",
         Replaced::Unlinked => "; the file it replaced was deleted but not overwritten, as other names lead to it",
     };
-    print_report(
+    let name = output.file_name().unwrap_or_default().to_string_lossy();
+    report::show(
         "DECRYPTION SUCCESSFUL",
         &[
             ("Cipher", "AES-256-GCM (authenticated encryption)".into()),
@@ -144,8 +145,9 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             ("Shell history", history),
             ("Time", format!("{elapsed:.2?}")),
         ],
-    );
-    Ok(())
+        &format!("{name}.decryption-summary"),
+        interactive && !options.yes,
+    )
 }
 
 /// Checks the magic bytes and returns the format version, if it's one this

@@ -1,9 +1,39 @@
 //! Process-wide protections for the keys and plaintext held in memory, and
 //! interrupt handling that lets the program clean up before it exits.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use zeroize::Zeroize;
+
 use crate::error::{Error, Result};
+
+/// The program's memory allocator: the system's, except that every block is
+/// overwritten with zeros when it's freed. Keys and plaintext are wiped where
+/// they're used, but this also catches everything else, such as file names,
+/// typed answers and the report, so nothing the program held lingers in
+/// freed memory. Growing a block goes through `alloc` and `dealloc`, so the
+/// old copy is zeroed too.
+pub struct ZeroOnFree;
+
+// SAFETY: allocation is passed straight to the system allocator; `dealloc`
+// only writes zeros to the block it's given before handing it back.
+unsafe impl GlobalAlloc for ZeroOnFree {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe {
+            std::slice::from_raw_parts_mut(ptr, layout.size()).zeroize();
+            System.dealloc(ptr, layout);
+        }
+    }
+}
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LOCK_FAILED: AtomicBool = AtomicBool::new(false);

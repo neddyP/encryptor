@@ -43,17 +43,34 @@ See [Install](#install) for details, including permission errors.
   with zeros and flushed to disk, renamed to random characters so its name
   doesn't linger either, then removed. It is opened once and handled through
   that one handle, so swapping it for a symlink part way through can't
-  redirect the overwrite to another file.
+  redirect the overwrite to another file. A read-only original you own is
+  allowed writing just long enough to open it, with its permissions put back
+  straight away. A file that can't be overwritten, or that other names (hard
+  links) also lead to, is refused before any key is made.
 - **Nothing left in memory.** Keys, plaintext and typed input are kept in RAM
-  (never swapped out) and zeroed as soon as they're no longer needed. Core
-  dumps are disabled, and on Linux other programs running as you can't read
-  the tool's memory.
+  (never swapped out) and zeroed as soon as they're no longer needed, and
+  every other block of memory the tool frees, holding file names, answers or
+  the report, is overwritten with zeros too. Core dumps are disabled, and on
+  Linux other programs running as you can't read the tool's memory.
 - **Nothing left on disk.** Unused key files, partial output, output that
   fails verification, and a file that decrypting replaces are overwritten
-  with zeros before they're deleted. The tool writes no logs.
-- **Keys scrubbed from shell history.** Whenever a key is used, any copy of it
-  in your bash, zsh or fish history files is overwritten with asterisks, in
-  case it was ever typed or pasted into a command.
+  with zeros before they're deleted, and temporary files have random names.
+  The tool writes no logs.
+- **No trace on the desktop.** On Linux, the original's thumbnails (small
+  pictures of its contents, made when a file manager or file picker showed
+  it) are shredded, and its entry in the desktop's list of recently used
+  files is removed.
+- **No trace in shell history.** Every run removes the entries in your bash,
+  zsh and fish history files that ran the tool, and every key it uses is
+  removed with the entries holding it, in case it was ever typed or pasted
+  into a command. The files are rewritten in place, and the bytes left over
+  are zeroed before they're cut short.
+- **Terminal wiped when you're done.** After the report, you're offered to
+  save it as a text file, then pressing Enter wipes the terminal: the screen
+  and its scrollback, and in tmux, the pane's history.
+- **Warned about disks that keep old copies.** On a copy-on-write filesystem
+  (APFS, btrfs, ZFS and the like) overwriting can't reach a file's old
+  contents, so you're told and asked before encrypting.
 - **Hidden key entry.** Keys typed at the prompt are not echoed. When
   encrypting, a typed key must be entered twice so a typo can't lock the file
   for good.
@@ -242,13 +259,24 @@ Encrypt using AES-256-GCM? [y/n]: y
   Metadata       stored encrypted: permissions 644, owner 1000:1000, accessed, modified and created times
   Integrity      verified: re-read from disk, decrypted, SHA-256 matches original
   Original       overwritten with zeros, name scrambled, then deleted
+  Desktop traces removed 1 thumbnail and 1 recently used entry
   Key and data   kept in RAM (never swapped), wiped after use
+  Shell history  removed 2 entries that ran this tool, from ~/.bash_history
   Time           15.75ms
 ----------------------------------------------------------------
+Save this summary as report.pdf.encryption-summary.txt in the current folder? [y/n]: n
+
+Press Enter to wipe the terminal:
 ```
 
 The prompts go in this order:
 
+0. **Encrypt anyway?** Asked only when the file is on a copy-on-write
+   filesystem, such as APFS on a Mac or btrfs, which writes changes to a new
+   place on the disk. Overwriting the original then can't reach its old
+   contents, which stay on the disk until the space is reused, and in any
+   snapshots. Full-disk encryption (FileVault or LUKS) keeps them unreadable
+   without your password. `--yes` answers this too.
 1. **Generate a random key?** Answer `n` to enter your own key instead; the
    save and print questions are then skipped.
 2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
@@ -267,6 +295,16 @@ The prompts go in this order:
    choose one.
 4. **Encrypt?** `n` cancels. A key file saved earlier is then removed, since
    it never encrypted anything.
+5. **Save this summary?** `y` saves the report as
+   `<file>.encryption-summary.txt` in the current directory, readable only
+   by you (a number is added if the name is taken).
+6. **Press Enter to wipe the terminal.** Everything in the terminal is
+   cleared, scrollback included, along with the pane's history in tmux.
+   If something recorded the session, it's named first, since its copy
+   can't be wiped. Ctrl-C wipes too.
+
+The last two are only asked at a terminal, and not with `--yes` or
+`--quiet`, so scripts never wait for them.
 
 If `FILE.enc` already exists, the tool refuses to run rather than overwrite it.
 
@@ -312,7 +350,7 @@ recorders can't be seen from inside the session; see
 
 ```
 $ decrypt report.pdf.enc
-Enter key (64 hex characters, or path to a key file):
+Enter key (64 hex characters, or path to a key file from current directory):
 Decrypt using AES-256-GCM? [y/n]: y
 
 ----------------------------------------------------------------
@@ -333,7 +371,8 @@ Decrypt using AES-256-GCM? [y/n]: y
 
 At the key prompt, either type or paste the hex key, or give the path to the
 key file (for example `report.pdf.key`). Neither is echoed. You get three
-attempts.
+attempts. As after encrypting, you're then offered to save the summary, as
+`<file>.decryption-summary.txt`, and Enter wipes the terminal.
 
 The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
@@ -413,7 +452,7 @@ questions are therefore never answered from a pipe:
   one is at the keyboard. `yes | encrypt` can't agree to it.
 
 A hex key piped in or typed into a command ends up in your shell's history.
-The tool overwrites it in your history files the next time that key is used,
+The tool removes it from your history files the next time that key is used,
 but it can't reach the copy the running shell holds in memory, which is saved
 when the shell exits. If you've done this, run `history -c` in that shell.
 
@@ -510,9 +549,29 @@ starts with the metadata, as above; version 1's is just the contents.
 - **Lose the key, lose the file.** There's no recovery or backdoor. Keep key
   files somewhere other than next to the encrypted file.
 - **Overwriting isn't guaranteed to erase.** SSD wear levelling, copy-on-write
-  filesystems (btrfs, ZFS) and backups can keep old copies of the original,
-  and of history lines and files the tool overwrites. Full-disk encryption is
-  the reliable protection for those.
+  filesystems (APFS, btrfs, ZFS), snapshots and backups can keep old copies
+  of the original, and of history files and thumbnails the tool overwrites.
+  Full-disk encryption is the reliable protection for those.
+- **Some traces are out of the tool's reach.** It removes what it can find,
+  but a run can still be told from:
+  - **The command that ran it, in the shell you ran it from.** Shells keep
+    their own session's history in memory and save it when they exit, after
+    the tool has finished, so it's only removed by a later run. Start the
+    command with a space to keep it out: bash does that with
+    `HISTCONTROL=ignorespace` (or `ignoreboth`, Ubuntu's default), zsh with
+    `setopt HIST_IGNORE_SPACE`, and fish always. Other shells left open can
+    also write back entries they read when they started.
+  - **Timestamps.** The `.enc` and `.key` files and their folder show when
+    they were written, and the tool's own program file shows when it was
+    last run, unless the disk is mounted with `noatime`.
+  - **Copies other programs made.** Editor backups, downloads, email
+    attachments, cloud sync and backups, desktop search indexes (GNOME's
+    LocalSearch, KDE's Baloo), other programs' own lists of recent files,
+    and on macOS, Quick Look's thumbnails and Spotlight.
+  - **Terminal records.** Session recorders, terminal emulator logs and GNU
+    screen's scrollback keep their own copy of what was shown, as do sudo
+    I/O logs and process accounting where a system administrator has turned
+    them on.
 - **Not every recorder can be detected.** Terminal emulator session logs
   (such as iTerm2's automatic logging), recorders on the machine you
   connected from over SSH, sudo I/O logs and kernel keystroke auditing
@@ -544,7 +603,8 @@ rejection, detection of a change to any chunk, of chunks reordered, added or
 cut off, and of truncation, a known-answer test against a file made by
 another implementation, decrypting the earlier formats, key parsing,
 overwriting and deleting files (including when a file is swapped for a
-symlink part way through), history redaction, escaping of untrusted file
+symlink part way through, is read-only, or has other names), removing shell
+history entries, thumbnails and recently used entries, escaping of untrusted file
 names, recognising recorders and the files they write to, storing and restoring
 metadata (including reading files from earlier versions), and the advice in
 error messages. `tests/cli.rs` runs the program itself as a script would, with
@@ -558,25 +618,28 @@ The code is in `src/`:
 | `cli.rs`       | The command line and its options                                     |
 | `encrypt.rs`   | The encrypt command and its report                                   |
 | `decrypt.rs`   | The decrypt command and its report                                   |
-| `keys.rs`      | Generating, saving, printing and entering keys; history scrubbing    |
+| `keys.rs`      | Generating, saving, printing and entering keys                       |
+| `history.rs`   | Removing keys and runs of the tool from shell history                |
+| `desktop.rs`   | Removing the original's thumbnails and recently used entries         |
 | `stream.rs`    | Chunked encryption, format version 3                                 |
 | `legacy.rs`    | Decrypting format versions 1 and 2                                   |
 | `meta.rs`      | The stored metadata                                                  |
 | `files.rs`     | Checking input, reading back from disk, writing output safely        |
-| `wipe.rs`      | Secure deletion and history redaction                                |
+| `wipe.rs`      | Secure deletion, and rewriting files in place                        |
 | `term.rs`      | Terminal input and output, prompts, progress                         |
 | `recording.rs` | Finding anything recording the session                               |
 | `explain.rs`   | Error messages and their fixes                                       |
 | `error.rs`     | The error type                                                       |
-| `protect.rs`   | Process hardening, memory locking, interrupts                        |
-| `report.rs`    | The report printed on success                                        |
+| `protect.rs`   | Process hardening, memory locking and zeroing, interrupts            |
+| `report.rs`    | The report printed on success, saving it, and wiping the terminal    |
 
 It uses the RustCrypto
 [`aes-gcm`](https://crates.io/crates/aes-gcm),
 [`hkdf`](https://crates.io/crates/hkdf) and
 [`sha2`](https://crates.io/crates/sha2) crates,
 [`zeroize`](https://crates.io/crates/zeroize) for wiping secrets,
-[`getrandom`](https://crates.io/crates/getrandom) for randomness and
+[`getrandom`](https://crates.io/crates/getrandom) for randomness,
+[`md-5`](https://crates.io/crates/md-5) for finding thumbnails by name and
 [`libc`](https://crates.io/crates/libc) for the system calls.
 
 ## Releasing

@@ -152,7 +152,11 @@ impl PartFile {
         if !replace && path.exists() {
             return Err(Error::File(format!("{} already exists", safe_path(path))));
         }
-        let tmp = with_suffix(path, &format!(".{}.part", std::process::id()));
+        // Random, so the name left behind in the folder's records doesn't
+        // tell when or by which process it was written.
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).map_err(explain::random_failed)?;
+        let tmp = with_suffix(path, &format!(".{}.part", hex::encode(random)));
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -262,6 +266,44 @@ fn shred_in_place(path: &Path) -> Replaced {
         Err(_) => Replaced::Nothing,
         Ok(meta) if meta.is_file() && meta.nlink() == 1 && wipe::zero(path).is_ok() => Replaced::Shredded,
         Ok(_) => Replaced::Unlinked,
+    }
+}
+
+/// The filesystem `file` is on, if it's one that writes changes to a new
+/// place on the disk rather than over the old data, so overwriting a file
+/// leaves its old contents where they were.
+pub fn copy_on_write(file: &File) -> Option<&'static str> {
+    // SAFETY: statfs is plain data, filled in by fstatfs before it's read.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut fs) } != 0 {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Filesystem magic numbers are 32 bits, whatever type holds them.
+        match fs.f_type as u64 & 0xffff_ffff {
+            0x9123_683e => Some("btrfs"),
+            0x2fc1_2fc1 => Some("ZFS"),
+            0xca45_1a4e => Some("bcachefs"),
+            0xf2f5_2010 => Some("F2FS"),
+            0x3434 => Some("NILFS"),
+            _ => None,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: the kernel NUL-terminates the name.
+        let name = unsafe { std::ffi::CStr::from_ptr(fs.f_fstypename.as_ptr()) };
+        match name.to_bytes() {
+            b"apfs" => Some("APFS"),
+            b"zfs" => Some("ZFS"),
+            _ => None,
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fs;
+        None
     }
 }
 

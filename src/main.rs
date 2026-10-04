@@ -7,10 +7,12 @@
 
 mod cli;
 mod decrypt;
+mod desktop;
 mod encrypt;
 mod error;
 mod explain;
 mod files;
+mod history;
 mod home;
 mod keys;
 mod legacy;
@@ -33,6 +35,9 @@ const MAGIC: &[u8; 4] = b"AGCM";
 /// The newest format version, which is the one written.
 const VERSION: u8 = stream::VERSION;
 const KEY_LEN: usize = 32;
+
+#[global_allocator]
+static ALLOCATOR: protect::ZeroOnFree = protect::ZeroOnFree;
 
 const USAGE: &str = "\
 encryptor - encrypt and decrypt files with AES-256-GCM
@@ -90,6 +95,10 @@ fn main() -> ExitCode {
     }
 
     let result = run(&args);
+    // Whatever happened, including a typo or --help, the command that ran
+    // this shouldn't stay in shell history. Most runs have already done this,
+    // and say so in the report.
+    let _ = history::clean(None);
     protect::scrub_stack();
     match result {
         Ok(()) => ExitCode::SUCCESS,

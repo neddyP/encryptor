@@ -1,5 +1,5 @@
-//! Keys: generating, saving and printing them, reading them as typed or from
-//! a key file, and scrubbing them from shell history.
+//! Keys: generating, saving and printing them, and reading them as typed or
+//! from a key file.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -24,8 +24,8 @@ pub type SecretKey = Box<Zeroizing<[u8; KEY_LEN]>>;
 
 pub enum KeySource {
     Generated { saved_to: Option<PathBuf>, printed: Printed },
-    FromFile { path: PathBuf, history: String },
-    Entered { history: String },
+    FromFile { path: PathBuf },
+    Entered,
 }
 
 /// Whether a generated key was printed, and whether anything kept a copy.
@@ -66,8 +66,7 @@ impl Drop for UnusedKeyFile {
 pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) -> Result<(SecretKey, KeySource)> {
     if let Some(path) = &options.key_file {
         let key = read_key_file(path)?;
-        let history = scrub_history(&key);
-        return Ok((key, KeySource::FromFile { path: path.clone(), history }));
+        return Ok((key, KeySource::FromFile { path: path.clone() }));
     }
     if let Some(destination) = &options.new_key {
         let key = generate()?;
@@ -83,8 +82,7 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
         let give_up = "no valid key after 3 attempts.\nRun encrypt again and answer y to have a random \
                        key generated, or enter a key of 64 characters, 0-9 and a-f.";
         let (key, _) = prompt(true, give_up)?;
-        let history = scrub_history(&key);
-        return Ok((key, KeySource::Entered { history }));
+        return Ok((key, KeySource::Entered));
     }
 
     let key = generate()?;
@@ -269,7 +267,7 @@ fn create_key_file(key: &[u8; KEY_LEN], path: &Path) -> std::result::Result<Path
 /// unrecoverable. `give_up` is the error after three failed attempts.
 pub fn prompt(confirm_typed: bool, give_up: &str) -> Result<(SecretKey, Option<PathBuf>)> {
     for _ in 0..3 {
-        let input = term::read_secret("Enter key (64 hex characters, or path to a key file): ")?;
+        let input = term::read_secret("Enter key (64 hex characters, or path to a key file from current directory): ")?;
         let (key, key_file) = match parse(&input) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -356,34 +354,6 @@ fn key_from_file(path: &Path, mut file: File) -> Result<SecretKey> {
     }
     let size = if meta.is_file() { meta.len() } else { len as u64 };
     Err(Error::KeyOrData(explain::key_file_size(path, size)))
-}
-
-/// Redacts every copy of the key from shell history files, in case it was
-/// ever typed or pasted into a command, and describes the result.
-pub fn scrub_history(key: &[u8; KEY_LEN]) -> String {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let shown = |path: &Path| match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
-        Some(rest) => format!("~/{}", safe_path(rest)),
-        None => safe_path(path),
-    };
-    let mut redacted = Vec::new();
-    let mut unreadable = Vec::new();
-    for path in wipe::history_files() {
-        match wipe::redact_key(&path, key) {
-            Ok(0) => {}
-            Ok(n) => redacted.push(format!("{n} in {}", shown(&path))),
-            Err(e) => unreadable.push(format!("{} ({e})", shown(&path))),
-        }
-    }
-    let mut status = if redacted.is_empty() {
-        "key not found in shell history".to_string()
-    } else {
-        format!("key redacted ({})", redacted.join(", "))
-    };
-    if !unreadable.is_empty() {
-        status.push_str(&format!("; could not check {}", unreadable.join(", ")));
-    }
-    status
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
 //! The encrypt command: checks, key, chunked encryption, verification from
-//! disk, then the original is destroyed, unless kept, and a report printed.
+//! disk, then the original is destroyed with the traces left of it, unless
+//! kept, and a report printed.
 
+use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,9 +12,9 @@ use crate::explain::{self, Action};
 use crate::files::{self, PartFile};
 use crate::keys::{self, KeySource, Printed, UnusedKeyFile};
 use crate::meta::Metadata;
-use crate::report::{fmt_size, print_report};
+use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe_path};
-use crate::{KEY_LEN, protect, stream, wipe};
+use crate::{KEY_LEN, desktop, history, protect, stream, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("encrypt", file)?;
@@ -21,15 +23,25 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     if output.exists() {
         return Err(Error::File(explain::output_exists(&output)));
     }
-    // Problems found now save asking for a key that can't be used.
-    files::open_no_follow(&input).map_err(|e| Error::File(explain::file(Action::Read, &input, &e)))?;
+    // Problems found now save asking for a key that can't be used. Unless
+    // it's to be kept, the original is opened to be overwritten too, which
+    // fails now if that couldn't be done later.
+    let mut original = wipe::Original::open(&input, !options.keep)?;
     files::check_writable(&output)?;
     if let Some(new_key) = &options.new_key {
         keys::check_new_key(new_key)?;
     }
+    if let Some(filesystem) = files::copy_on_write(original.file()).filter(|_| !options.keep) {
+        eprintln!("{}", explain::copy_on_write(&input, filesystem));
+        if !options.yes && !confirm("Encrypt anyway?")? {
+            eprintln!("Cancelled; nothing was encrypted.");
+            return Ok(());
+        }
+    }
 
     let mut key_file = UnusedKeyFile::default();
     let (key, source) = keys::establish(&input, &mut key_file, options)?;
+    let history = history::clean(Some(&key));
 
     if !options.yes && !confirm("Encrypt using AES-256-GCM?")? {
         eprintln!("Cancelled; nothing was encrypted.");
@@ -38,7 +50,6 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
 
     let started = Instant::now();
     let read_error = |e| Error::File(explain::file(Action::Read, &input, &e));
-    let mut original = wipe::Original::open(&input).map_err(read_error)?;
     let before = original.file().metadata().map_err(read_error)?;
     let len = before.len();
     // Captured before reading, which can update the access time.
@@ -92,9 +103,12 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         return Err(Error::Interrupted);
     }
     key_file.keep();
-    let original_status = match options.keep {
-        true => "kept, as asked with --keep".into(),
-        false => original.destroy(&input),
+    let (original_status, traces) = match options.keep {
+        true => ("kept, as asked with --keep".into(), None),
+        false => match original.destroy(&input) {
+            Ok(status) => (status, desktop::forget(&input)),
+            Err(warning) => (warning, None),
+        },
     };
     let elapsed = started.elapsed();
     if options.quiet {
@@ -111,7 +125,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             rows.push(("Key", format!("256-bit, from {}", safe_path(path))));
             rows.push(("Key storage", "your key file; not changed by this tool".into()));
         }
-        KeySource::Entered { .. } => {
+        KeySource::Entered => {
             rows.push(("Key", "256-bit, entered by you".into()));
             rows.push(("Key storage", "not stored by this tool".into()));
         }
@@ -136,14 +150,18 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         ("Metadata", format!("stored encrypted: {}", metadata.summary())),
         ("Integrity", "verified: re-read from disk, decrypted, SHA-256 matches original".into()),
         ("Original", original_status),
-        ("Key and data", protect::memory_status().into()),
     ]);
-    if let KeySource::Entered { history } | KeySource::FromFile { history, .. } = source {
-        rows.push(("Shell history", history));
+    if let Some(traces) = traces {
+        rows.push(("Desktop traces", traces));
     }
-    rows.push(("Time", format!("{elapsed:.2?}")));
-    print_report("ENCRYPTION SUCCESSFUL", &rows);
-    Ok(())
+    rows.extend([
+        ("Key and data", protect::memory_status().into()),
+        ("Shell history", history),
+        ("Time", format!("{elapsed:.2?}")),
+    ]);
+    let name = input.file_name().unwrap_or_default().to_string_lossy();
+    let ask = io::stdin().is_terminal() && !options.yes;
+    report::show("ENCRYPTION SUCCESSFUL", &rows, &format!("{name}.encryption-summary"), ask)
 }
 
 /// Where a generated key went, for the report.

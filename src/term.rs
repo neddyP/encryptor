@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
-use crate::protect;
+use crate::{protect, recording};
 
 /// Longest line accepted at a prompt. Line buffers are allocated at this size
 /// up front because growing them would leave copies of the input behind.
@@ -113,6 +113,46 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
     let _ = tty.write_all(b"\x1b[2J\x1b[3J\x1b[H\x1b[?1049l");
     drop(raw);
     result.map(|()| Shown::Yes)
+}
+
+/// Waits for Enter before the terminal is wiped, first naming anything that
+/// recorded the session, since wiping the terminal can't remove its copy.
+pub fn wait_to_wipe() -> Result<()> {
+    let recorders = recording::scan();
+    if !recorders.is_empty() {
+        eprintln!();
+        eprintln!("note: wiping the terminal won't remove what these have recorded:");
+        for recorder in &recorders {
+            eprint!("{recorder}");
+        }
+    }
+    eprint!("\nPress Enter to wipe the terminal: ");
+    let _raw = RawMode::enter(libc::STDIN_FILENO)?;
+    wait_for_enter(libc::STDIN_FILENO)
+}
+
+/// Clears the terminal and its scrollback: everything shown in it, by this
+/// program and before. Inside tmux, its own history of the pane is cleared
+/// as well, since the terminal only holds what tmux shows of it.
+pub fn wipe_screen() {
+    let clear = b"\x1b[H\x1b[2J\x1b[3J";
+    match OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(mut tty) => {
+            let _ = tty.write_all(clear);
+        }
+        Err(_) => {
+            let _ = io::stderr().write_all(clear);
+        }
+    }
+    if std::env::var_os("TMUX").is_some() {
+        let mut tmux = std::process::Command::new("tmux");
+        tmux.arg("clear-history");
+        if let Some(pane) = std::env::var_os("TMUX_PANE") {
+            tmux.arg("-t").arg(pane);
+        }
+        let quiet = std::process::Stdio::null;
+        let _ = tmux.stdin(quiet()).stdout(quiet()).stderr(quiet()).status();
+    }
 }
 
 /// A progress line on standard error for long jobs, shown only on a terminal
