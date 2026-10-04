@@ -24,7 +24,7 @@ pub fn read_line(prompt: &str) -> Result<Zeroizing<String>, String> {
     let mut line = line_buffer();
     loop {
         match read_byte(libc::STDIN_FILENO)? {
-            None if line.is_empty() => return Err("input ended unexpectedly".into()),
+            None if line.is_empty() => return Err(input_ended()),
             None | Some(b'\n') => break,
             Some(byte) => push(&mut line, byte)?,
         }
@@ -52,7 +52,7 @@ pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>, String> {
                     eprintln!();
                     return Err(protect::INTERRUPTED.into());
                 }
-                Some(0x04) if line.is_empty() => return Err("input ended unexpectedly".into()),
+                Some(0x04) if line.is_empty() => return Err(input_ended()),
                 Some(0x7f | 0x08) => pop_char(&mut line),
                 Some(0x15) => line.clear(),
                 Some(0x1b) => skip_escape_sequence(libc::STDIN_FILENO)?,
@@ -79,16 +79,10 @@ pub enum Shown {
 pub fn show_key(key: &[u8; 32]) -> Result<Shown, String> {
     let term = std::env::var("TERM").unwrap_or_default();
     if term.is_empty() || term == "dumb" {
-        return Ok(Shown::Unavailable("the terminal can't erase it afterwards"));
-    }
-    if std::env::var_os("ASCIINEMA_REC").is_some() {
-        return Ok(Shown::Unavailable("this terminal session is being recorded"));
-    }
-    if std::env::var_os("STY").is_some() {
-        return Ok(Shown::Unavailable("GNU screen may keep it in its scrollback"));
+        return Ok(Shown::Unavailable("the terminal type (TERM) is unset or \"dumb\", so it couldn't be erased afterwards"));
     }
     let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
-        return Ok(Shown::Unavailable("there is no interactive terminal"));
+        return Ok(Shown::Unavailable("there's no terminal to show it on, as the tool isn't running in a terminal window"));
     };
 
     let mut hex = Zeroizing::new([0u8; 64]);
@@ -141,6 +135,17 @@ fn is_direction_control(c: char) -> bool {
     )
 }
 
+/// Input that ran out before a question was answered.
+fn input_ended() -> String {
+    if io::stdin().is_terminal() {
+        "input ended (Ctrl-D) before the question was answered".into()
+    } else {
+        "the answers piped in ran out before every question was answered.\n\
+         Give one line per question, in the order they're asked; see Scripting in the README."
+            .into()
+    }
+}
+
 fn show_prompt(prompt: &str) -> Result<(), String> {
     print!("{prompt}");
     io::stdout().flush().map_err(|e| format!("cannot write to terminal: {e}"))
@@ -154,7 +159,7 @@ fn line_buffer() -> Zeroizing<Vec<u8>> {
 
 fn push(line: &mut Vec<u8>, byte: u8) -> Result<(), String> {
     if line.len() == MAX_LINE {
-        return Err("input line too long".into());
+        return Err(format!("that line is over {MAX_LINE} bytes, the longest a path or answer can be"));
     }
     line.push(byte);
     Ok(())
@@ -173,7 +178,8 @@ fn finish(mut line: Zeroizing<Vec<u8>>) -> Result<Zeroizing<String>, String> {
     line.drain(..start);
     String::from_utf8(std::mem::take(&mut *line)).map(Zeroizing::new).map_err(|e| {
         e.into_bytes().zeroize();
-        "input is not valid text".to_string()
+        "that isn't valid UTF-8 text. If it's a file name with unusual characters, rename the file and try again"
+            .to_string()
     })
 }
 
@@ -219,7 +225,7 @@ fn wait_for_enter(fd: libc::c_int) -> Result<(), String> {
                 protect::request_stop();
                 return Err(protect::INTERRUPTED.into());
             }
-            None => return Err("the terminal closed".into()),
+            None => return Err("the terminal closed before Enter was pressed".into()),
             Some(_) => {}
         }
     }

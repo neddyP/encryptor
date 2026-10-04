@@ -39,6 +39,10 @@ impl Original {
         Ok(Self { file, dev: meta.dev(), ino: meta.ino(), writable })
     }
 
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
     pub fn len(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())
     }
@@ -56,7 +60,10 @@ impl Original {
         match remove_if_same(path, self.dev, self.ino) {
             Ok(()) if zeroed => "overwritten with zeros, name scrambled, then deleted".into(),
             Ok(()) => "name scrambled and deleted (read-only, so not overwritten)".into(),
-            Err(e) => format!("WARNING: not deleted ({e}); delete it yourself"),
+            Err(e) => format!(
+                "WARNING: not deleted, as {}. The encrypted copy is verified, so delete the original yourself",
+                crate::explain::cause(crate::explain::Action::Delete, path, &e)
+            ),
         }
     }
 }

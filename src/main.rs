@@ -4,18 +4,23 @@
 //!
 //! ```text
 //! +--------------+-------------+------------+----------------+----------+
-//! | magic "AGCM" | version (1) | nonce (12) | ciphertext (n) | tag (16) |
+//! | magic "AGCM" | version (2) | nonce (12) | ciphertext (n) | tag (16) |
 //! +--------------+-------------+------------+----------------+----------+
 //! ```
 //!
 //! The 17-byte header is passed to GCM as associated data, so changing any
-//! byte of the header, ciphertext or tag makes decryption fail.
+//! byte of the header, ciphertext or tag makes decryption fail. From version 2
+//! the plaintext starts with the original file's metadata (see `meta`), so it
+//! is encrypted too; version 1 files hold only the contents.
 
+mod explain;
+mod meta;
 mod protect;
+mod recording;
 mod term;
 mod wipe;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -29,16 +34,21 @@ use aes_gcm::aead::{AeadInOut, KeyInit, Nonce, Tag};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use explain::Action;
+use meta::Metadata;
 use term::{Shown, safe, safe_path};
 
 const MAGIC: &[u8; 4] = b"AGCM";
-const VERSION: u8 = 1;
+/// The format version written. Version 1, without metadata, is still read.
+const VERSION: u8 = 2;
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const NONCE_START: usize = MAGIC.len() + 1;
 const HEADER_LEN: usize = NONCE_START + NONCE_LEN;
 const ENC_EXT: &str = "enc";
+const AUTH_FAILED: &str =
+    "authentication failed: wrong key, or the file is corrupted or has been tampered with.";
 
 const USAGE: &str = "\
 aes256 - encrypt and decrypt files with AES-256-GCM
@@ -53,6 +63,9 @@ USAGE:
 
 Anything not given on the command line is asked for. When asked for a key,
 enter 64 hex characters or the path to a 32-byte key file.
+
+To encrypt a folder or several files, zip them into one file first:
+    zip -r photos.zip photos
 ";
 
 /// Key bytes live on the heap, locked in RAM, so moving the handle never
@@ -62,8 +75,18 @@ type SecretKey = Box<Zeroizing<[u8; KEY_LEN]>>;
 type Result<T> = std::result::Result<T, String>;
 
 enum KeySource {
-    Generated { saved_to: Option<PathBuf>, printed: bool },
+    Generated { saved_to: Option<PathBuf>, printed: Printed },
     Entered { history: String },
+}
+
+/// Whether a generated key was printed, and whether anything kept a copy.
+#[derive(PartialEq)]
+enum Printed {
+    No,
+    /// Shown and erased, with nothing found recording the session.
+    Erased,
+    /// Shown while the named programs were recording or sharing the session.
+    Captured(String),
 }
 
 /// Shreds a freshly saved key file unless encryption completes, including
@@ -90,9 +113,13 @@ impl Drop for UnusedKeyFile {
 fn main() -> ExitCode {
     protect::harden_process();
 
-    let mut args = std::env::args();
+    let mut args = std::env::args_os();
     let program = args.next().unwrap_or_default();
-    let mut args: Vec<String> = args.collect();
+    let Ok(mut args) = args.map(OsString::into_string).collect::<std::result::Result<Vec<_>, _>>() else {
+        eprintln!("\nerror: a name on the command line isn't valid UTF-8 text, which this tool can't read.");
+        eprintln!("Rename the file using ordinary letters and numbers, then try again.");
+        return ExitCode::FAILURE;
+    };
 
     // Started through the `encrypt` or `decrypt` link: the name is the command.
     let name = Path::new(&program).file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -121,13 +148,17 @@ fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     if args.len() > 2 {
-        return Err(format!("too many arguments\n\n{USAGE}"));
+        return Err(match args[0].as_str() {
+            "encrypt" | "enc" | "e" => explain::zip_instead(&args[1..]),
+            "decrypt" | "dec" | "d" => explain::decrypt_one_at_a_time(&args[1..]),
+            other => explain::unknown_command(other, USAGE),
+        });
     }
     let file = args.get(1).map(String::as_str);
     match args.first().map(String::as_str) {
         Some("encrypt" | "enc" | "e") => encrypt_command(file),
         Some("decrypt" | "dec" | "d") => decrypt_command(file),
-        Some(other) => Err(format!("unknown command '{}'\n\n{USAGE}", safe(other))),
+        Some(other) => Err(explain::unknown_command(other, USAGE)),
         None => match choose("Encrypt or decrypt?", &["encrypt", "decrypt"])? {
             "encrypt" => encrypt_command(None),
             _ => decrypt_command(None),
@@ -140,12 +171,15 @@ fn run(args: &[String]) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn encrypt_command(file: Option<&str>) -> Result<()> {
-    let input = file_path(file, "File to encrypt: ")?;
-    regular_file_len(&input)?;
+    let input = file_path("encrypt", file)?;
+    input_len("encrypt", &input)?;
     let output = with_suffix(&input, &format!(".{ENC_EXT}"));
     if output.exists() {
-        return Err(format!("{} already exists; move it out of the way first", safe_path(&output)));
+        return Err(explain::output_exists(&output));
     }
+    // Problems found now save asking for a key that can't be used.
+    open_no_follow(&input).map_err(|e| explain::file(Action::Read, &input, &e))?;
+    check_writable(&output)?;
 
     let mut key_file = UnusedKeyFile(None);
     let (key, source) = establish_key(&input, &mut key_file)?;
@@ -156,15 +190,20 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
     }
 
     let started = Instant::now();
-    let mut original = wipe::Original::open(&input).map_err(|e| open_error(&input, e))?;
-    let len = original.len().map_err(|e| read_error(&input, e))?;
-    if len > aes_gcm::P_MAX {
-        return Err("file is larger than the 64 GiB AES-GCM limit".into());
+    let read_error = |e| explain::file(Action::Read, &input, &e);
+    let mut original = wipe::Original::open(&input).map_err(read_error)?;
+    let len = original.len().map_err(read_error)?;
+    // Captured before reading, which can update the access time.
+    let metadata = Metadata::capture(original.file()).map_err(read_error)?;
+    let meta_len = metadata.encoded_len();
+    if meta_len as u64 + len > aes_gcm::P_MAX {
+        return Err(explain::too_large(&input, len));
     }
-    let mut data = secret_buffer(len)?;
-    original.read_exact(&mut data).map_err(|e| read_error(&input, e))?;
-    let plain_len = data.len();
-    let plain_hash = sha256(&data);
+    let mut data = secret_buffer(meta_len as u64 + len)?;
+    metadata.encode(&mut data[..meta_len]);
+    original.read_exact(&mut data[meta_len..]).map_err(read_error)?;
+    let plain_len = data.len() - meta_len;
+    let plain_hash = sha256(&data[meta_len..]);
 
     let (header, tag) = seal(&key, &mut data)?;
     write_file(&output, &[&header, &data, &tag], false)?;
@@ -174,7 +213,11 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
     // original is touched.
     if let Err(e) = verify_encrypted(&key, &output, plain_len, &plain_hash) {
         let _ = wipe::shred(&output);
-        return Err(format!("{e}\nremoved {} and left the original untouched", safe_path(&output)));
+        return Err(format!(
+            "{e}\nThe encrypted file didn't read back from disk as it was written, so it was removed \
+             and the original left untouched.\n{}",
+            explain::DISK_TROUBLE
+        ));
     }
     drop(key);
 
@@ -192,12 +235,21 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
         KeySource::Generated { saved_to, printed } => {
             rows.push(("Key", "256-bit, generated by the OS CSPRNG".into()));
             let storage = match (saved_to, printed) {
-                (Some(path), false) => {
+                (Some(path), Printed::No) => {
                     format!("saved to {} (owner read/write only)", safe_path(path))
                 }
-                (Some(path), true) => format!(
+                (Some(path), Printed::Erased) => format!(
                     "saved to {} (owner read/write only); also shown once on screen",
                     safe_path(path)
+                ),
+                (Some(path), Printed::Captured(by)) => format!(
+                    "saved to {} (owner read/write only); also shown on screen and captured \
+                     by {by}: anyone with that copy can decrypt the file",
+                    safe_path(path)
+                ),
+                (None, Printed::Captured(by)) => format!(
+                    "shown on screen and captured by {by}: anyone with that copy can decrypt \
+                     the file; not saved"
                 ),
                 (None, _) => "shown once on screen, then erased; not saved".into(),
             };
@@ -214,12 +266,20 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
         ("Input", format!("{}  {}", safe_path(&input), fmt_size(plain_len))),
         (
             "Output",
-            format!("{}  {}", safe_path(&output), fmt_size(HEADER_LEN + plain_len + TAG_LEN)),
+            format!(
+                "{}  {}",
+                safe_path(&output),
+                fmt_size(HEADER_LEN + meta_len + plain_len + TAG_LEN)
+            ),
         ),
         (
             "Overhead",
-            format!("{} bytes ({HEADER_LEN} header + {TAG_LEN} tag)", HEADER_LEN + TAG_LEN),
+            format!(
+                "{} bytes ({HEADER_LEN} header + {meta_len} metadata + {TAG_LEN} tag)",
+                HEADER_LEN + meta_len + TAG_LEN
+            ),
         ),
+        ("Metadata", format!("stored encrypted: {}", metadata.summary())),
         ("Integrity", "verified: re-read from disk, decrypted, SHA-256 matches original".into()),
         ("Original", original_status),
         ("Key and data", protect::memory_status().into()),
@@ -233,21 +293,32 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
 }
 
 fn decrypt_command(file: Option<&str>) -> Result<()> {
-    let input = file_path(file, "File to decrypt: ")?;
-    let input_len = regular_file_len(&input)?;
+    let input = file_path("decrypt", file)?;
+    let input_len = input_len("decrypt", &input)?;
 
-    // Reject files this tool didn't produce before asking for the key.
-    if input_len < (HEADER_LEN + TAG_LEN) as u64 {
-        return Err(format!("{} is too short to be an encrypted file", safe_path(&input)));
-    }
-    let mut header = [0u8; HEADER_LEN];
+    // Reject files this tool didn't produce before asking for the key, saying
+    // what they are instead where that can be told.
+    let mut start = Vec::with_capacity(HEADER_LEN);
     open_no_follow(&input)
-        .and_then(|mut f| f.read_exact(&mut header))
-        .map_err(|e| open_error(&input, e))?;
-    check_header(&header)?;
+        .and_then(|file| file.take(HEADER_LEN as u64).read_to_end(&mut start))
+        .map_err(|e| explain::file(Action::Read, &input, &e))?;
+    if !start.starts_with(MAGIC) {
+        return Err(explain::not_encrypted(&input, &start));
+    }
+    if input_len < (HEADER_LEN + TAG_LEN) as u64 {
+        return Err(explain::too_short(&input, input_len));
+    }
+    check_header(&start)?;
     let output = decrypted_path(&input);
+    check_writable(&output)?;
 
-    let key = prompt_key(false)?;
+    let plain_name = output.file_name().unwrap_or_default().to_string_lossy();
+    let give_up = format!(
+        "no valid key after 3 attempts.\nRun decrypt again with this file's key: the 64 characters \
+         printed when it was encrypted, or its key file, usually {}.key.",
+        safe(&plain_name)
+    );
+    let (key, key_file) = prompt_key(false, &give_up)?;
     let history = scrub_history(&key);
 
     if !confirm("Decrypt using AES-256-GCM?")? {
@@ -261,7 +332,10 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
     }
 
     let started = Instant::now();
-    let plain = open(&key, read_file(&input)?)?;
+    let (metadata, plain) = open(&key, read_file(&input)?).map_err(|e| match e.as_str() {
+        AUTH_FAILED => explain::wrong_key(&input, key_file.as_deref()),
+        _ => e,
+    })?;
     drop(key);
     let plain_len = plain.len();
     let plain_hash = sha256(&plain);
@@ -272,14 +346,25 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
     if *sha256_file(&output)? != *plain_hash {
         let _ = wipe::shred(&output);
         return Err(format!(
-            "{} did not read back correctly from disk and was removed",
-            safe_path(&output)
+            "{} didn't read back from disk as it was written, so it was removed. The encrypted \
+             file is untouched.\n{}",
+            safe_path(&output),
+            explain::DISK_TROUBLE
         ));
     }
     if protect::stop_requested() {
         let _ = wipe::shred(&output);
         return Err(protect::INTERRUPTED.into());
     }
+    // Only now, since the original permissions may not let the file be read
+    // back or shredded.
+    let metadata_status = match metadata {
+        Some(metadata) => match open_no_follow(&output) {
+            Ok(file) => metadata.restore(&file),
+            Err(e) => format!("not restored: {}", explain::cause(Action::Read, &output, &e)),
+        },
+        None => "none stored (encrypted by a version before 2.0)".into(),
+    };
     let elapsed = started.elapsed();
 
     print_report(
@@ -291,6 +376,7 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
             ("Input", format!("{}  {} (kept)", safe_path(&input), fmt_size(input_len as usize))),
             ("Output", format!("{}  {}", safe_path(&output), fmt_size(plain_len))),
             ("Integrity", "verified: re-read from disk, SHA-256 matches decrypted data".into()),
+            ("Metadata", metadata_status),
             ("Key and data", protect::memory_status().into()),
             ("Shell history", history),
             ("Time", format!("{elapsed:.2?}")),
@@ -305,7 +391,9 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
 
 fn establish_key(input: &Path, key_file: &mut UnusedKeyFile) -> Result<(SecretKey, KeySource)> {
     if !confirm("Generate a random 256-bit key?")? {
-        let key = prompt_key(true)?;
+        let give_up = "no valid key after 3 attempts.\nRun encrypt again and answer y to have a random \
+                       key generated, or enter a key of 64 characters, 0-9 and a-f.";
+        let (key, _) = prompt_key(true, give_up)?;
         let history = scrub_history(&key);
         return Ok((key, KeySource::Entered { history }));
     }
@@ -317,11 +405,11 @@ fn establish_key(input: &Path, key_file: &mut UnusedKeyFile) -> Result<(SecretKe
     if confirm("Save symmetric encryption key as a file in your current directory?")? {
         saved_to = Some(save_key(&key, input, key_file)?);
     }
-    let mut printed = confirm("Print the key?")? && print_key(&key)?;
+    let mut printed = if confirm("Print the key?")? { print_key(&key)? } else { Printed::No };
 
     // A key that is neither saved nor printed is gone once the program exits,
     // and the file with it, so one of the two is required.
-    if saved_to.is_none() && !printed {
+    if saved_to.is_none() && printed == Printed::No {
         println!();
         println!("WARNING: the key has been neither saved nor printed. It exists only in");
         println!("this program's memory, so the encrypted file could never be decrypted.");
@@ -330,8 +418,8 @@ fn establish_key(input: &Path, key_file: &mut UnusedKeyFile) -> Result<(SecretKe
                 saved_to = Some(save_key(&key, input, key_file)?);
                 break;
             }
-            if print_key(&key)? {
-                printed = true;
+            printed = print_key(&key)?;
+            if printed != Printed::No {
                 break;
             }
         }
@@ -352,16 +440,39 @@ fn save_key(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> 
 }
 
 /// Shows the key on the terminal and erases it afterwards, or explains why it
-/// can't be shown here.
-fn print_key(key: &[u8; KEY_LEN]) -> Result<bool> {
-    match term::show_key(key)? {
-        Shown::Yes => {
-            println!("Key shown, then erased from the screen.");
-            Ok(true)
+/// can't be shown here. If anything is recording the session, says what and
+/// asks first.
+fn print_key(key: &[u8; KEY_LEN]) -> Result<Printed> {
+    let recorders = recording::scan();
+    let captured_by = (!recorders.is_empty()).then(|| recording::names(&recorders));
+    if let Some(by) = &captured_by {
+        println!();
+        println!("WARNING: something is recording or sharing this terminal session:");
+        for recorder in &recorders {
+            print!("{recorder}");
         }
+        if !confirm(&format!(
+            "Printing the key would save it to {by} compromising your encryption, \
+             do you still wish to print your decryption key?"
+        ))? {
+            println!("Key not printed.");
+            return Ok(Printed::No);
+        }
+    }
+    match term::show_key(key)? {
+        Shown::Yes => match captured_by {
+            Some(by) => {
+                println!("Key shown, then erased from the screen, but {by} captured it.");
+                Ok(Printed::Captured(by))
+            }
+            None => {
+                println!("Key shown, then erased from the screen.");
+                Ok(Printed::Erased)
+            }
+        },
         Shown::Unavailable(reason) => {
-            println!("  The key can't be printed here: {reason}.");
-            Ok(false)
+            println!("  The key can't be printed here: {reason}. Save it to a file instead.");
+            Ok(Printed::No)
         }
     }
 }
@@ -375,8 +486,15 @@ fn new_key() -> SecretKey {
 
 fn generate_key() -> Result<SecretKey> {
     let mut key = new_key();
-    getrandom::fill(&mut key[..]).map_err(|e| format!("system random generator failed: {e}"))?;
+    getrandom::fill(&mut key[..]).map_err(random_failed)?;
     Ok(key)
+}
+
+fn random_failed(e: getrandom::Error) -> String {
+    format!(
+        "the operating system's random number generator failed: {e}.\nNothing was encrypted. \
+         Try again; if it keeps failing, restart the computer."
+    )
 }
 
 /// Writes the raw key to `<input name>.key` in the working directory, adding a
@@ -385,8 +503,7 @@ fn write_key_file(key: &[u8; KEY_LEN], input: &Path) -> Result<PathBuf> {
     let base = input
         .file_name()
         .map_or_else(|| "aes256".into(), |n| n.to_string_lossy().into_owned());
-    let dir = std::env::current_dir()
-        .map_err(|e| format!("cannot determine the working directory: {e}"))?;
+    let dir = std::env::current_dir().map_err(|e| explain::no_working_folder(&e))?;
 
     for n in 1..=1000 {
         let name = if n == 1 { format!("{base}.key") } else { format!("{base}.{n}.key") };
@@ -395,25 +512,30 @@ fn write_key_file(key: &[u8; KEY_LEN], input: &Path) -> Result<PathBuf> {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(key).and_then(|()| file.sync_all()) {
                     let _ = wipe::shred(&path);
-                    return Err(format!("cannot write key file {}: {e}", safe_path(&path)));
+                    return Err(explain::file(Action::Write, &path, &e));
                 }
                 return Ok(path);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("cannot create key file {}: {e}", safe_path(&path))),
+            Err(e) => return Err(explain::file(Action::Create, &path, &e)),
         }
     }
-    Err("no free key file name in the working directory".into())
+    Err(format!(
+        "there are already 1000 key files for {} in {}.\nDelete the ones you no longer need, then try again.",
+        safe(&base),
+        safe_path(&dir)
+    ))
 }
 
-/// Asks for a key, allowing three attempts. With `confirm_typed`, a hex key has
-/// to be entered twice: the input is hidden, and encrypting with a mistyped key
-/// would make the file unrecoverable.
-fn prompt_key(confirm_typed: bool) -> Result<SecretKey> {
+/// Asks for a key, allowing three attempts, and returns it with the key file it
+/// came from, if any. With `confirm_typed`, a hex key has to be entered twice:
+/// the input is hidden, and encrypting with a mistyped key would make the file
+/// unrecoverable. `give_up` is the error after three failed attempts.
+fn prompt_key(confirm_typed: bool, give_up: &str) -> Result<(SecretKey, Option<PathBuf>)> {
     for _ in 0..3 {
         let input = term::read_secret("Enter key (64 hex characters, or path to a key file): ")?;
-        let key = match parse_key(&input) {
-            Ok(key) => key,
+        let (key, key_file) = match parse_key(&input) {
+            Ok(parsed) => parsed,
             Err(e) => {
                 println!("  {e}");
                 continue;
@@ -426,48 +548,47 @@ fn prompt_key(confirm_typed: bool) -> Result<SecretKey> {
             eprintln!("shell will save it to its history file when it exits.");
         }
         if !confirm_typed || !typed {
-            return Ok(key);
+            return Ok((key, key_file));
         }
         let again = term::read_secret("Re-enter the key to confirm: ")?;
-        if parse_key(&again).is_ok_and(|k| *k == *key) {
-            return Ok(key);
+        if parse_key(&again).is_ok_and(|(k, _)| *k == *key) {
+            return Ok((key, key_file));
         }
-        println!("  the keys did not match");
+        println!("  The two keys didn't match. Enter the same key both times; pasting it avoids typos.");
     }
-    Err("no valid key entered".into())
+    Err(give_up.into())
 }
 
-/// Accepts 64 hex characters or the path to a 32-byte binary key file. Error
-/// messages never echo the input, since it may be a mistyped key, and the
-/// path built from it is wiped too.
-fn parse_key(input: &str) -> Result<SecretKey> {
+/// Accepts 64 hex characters or the path to a 32-byte binary key file, and
+/// returns the key with the key file's path, if it came from one. Error
+/// messages never echo the input unless it is evidently a path, since it may
+/// be a mistyped key, and the path built from it is wiped too.
+fn parse_key(input: &str) -> Result<(SecretKey, Option<PathBuf>)> {
     let mut key = new_key();
 
-    if !input.is_empty() && input.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if input.is_empty() {
+        return Err(explain::EMPTY_KEY.into());
+    }
+    if input.bytes().all(|b| b.is_ascii_hexdigit()) {
         if input.len() != 2 * KEY_LEN {
-            return Err(format!(
-                "a hex key must be {} characters; that was {}",
-                2 * KEY_LEN,
-                input.len()
-            ));
+            return Err(explain::hex_key_length(input.len()));
         }
-        hex::decode_to_slice(input, &mut key[..]).map_err(|e| format!("invalid hex key: {e}"))?;
-        return Ok(key);
+        hex::decode_to_slice(input, &mut key[..]).expect("64 hex digits are 32 bytes");
+        return Ok((key, None));
     }
 
     let path_bytes = Zeroizing::new(clean_path(input).into_os_string().into_vec());
     let path = Path::new(OsStr::from_bytes(&path_bytes));
-    let invalid = || "not a valid key: expected 64 hex characters or the path to a key file".to_string();
-    let mut file = File::open(path).map_err(|_| invalid())?;
-    let meta = file.metadata().map_err(|_| invalid())?;
-    if !meta.is_file() {
-        return Err(invalid());
+    let mut file = File::open(path).map_err(|e| explain::not_a_key(input, path, &e))?;
+    let meta = file.metadata().map_err(|e| explain::file(Action::Read, path, &e))?;
+    if meta.is_dir() {
+        return Err(explain::key_file_folder(path));
     }
     if meta.len() != KEY_LEN as u64 {
-        return Err(format!("a key file must be exactly {KEY_LEN} bytes; that one is {}", meta.len()));
+        return Err(explain::key_file_size(path, meta.len()));
     }
-    file.read_exact(&mut key[..]).map_err(|e| format!("cannot read key file: {e}"))?;
-    Ok(key)
+    file.read_exact(&mut key[..]).map_err(|e| explain::file(Action::Read, path, &e))?;
+    Ok((key, Some(path.to_path_buf())))
 }
 
 /// Redacts every copy of the key from shell history files, in case it was
@@ -508,8 +629,7 @@ fn seal(key: &[u8; KEY_LEN], data: &mut [u8]) -> Result<([u8; HEADER_LEN], [u8; 
     let mut header = [0u8; HEADER_LEN];
     header[..NONCE_START - 1].copy_from_slice(MAGIC);
     header[NONCE_START - 1] = VERSION;
-    getrandom::fill(&mut header[NONCE_START..])
-        .map_err(|e| format!("system random generator failed: {e}"))?;
+    getrandom::fill(&mut header[NONCE_START..]).map_err(random_failed)?;
 
     let nonce = <&Nonce<Aes256Gcm>>::try_from(&header[NONCE_START..]).expect("nonce is 12 bytes");
     let tag = Aes256Gcm::new(key.into())
@@ -519,13 +639,14 @@ fn seal(key: &[u8; KEY_LEN], data: &mut [u8]) -> Result<([u8; HEADER_LEN], [u8; 
 }
 
 /// Authenticates and decrypts a complete encrypted file image in place and
-/// returns just the plaintext. Fails if the key is wrong or any byte of the
-/// header, ciphertext or tag has changed.
-fn open(key: &[u8; KEY_LEN], mut blob: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>> {
+/// returns the stored metadata, if the version has any, and the contents.
+/// Fails if the key is wrong or any byte of the header, ciphertext or tag has
+/// changed.
+fn open(key: &[u8; KEY_LEN], mut blob: Zeroizing<Vec<u8>>) -> Result<(Option<Metadata>, Zeroizing<Vec<u8>>)> {
     if blob.len() < HEADER_LEN + TAG_LEN {
         return Err("file is too short to be an encrypted file".into());
     }
-    check_header(&blob)?;
+    let version = check_header(&blob)?;
 
     let body_len = blob.len() - HEADER_LEN - TAG_LEN;
     let (header, rest) = blob.split_at_mut(HEADER_LEN);
@@ -536,28 +657,35 @@ fn open(key: &[u8; KEY_LEN], mut blob: Zeroizing<Vec<u8>>) -> Result<Zeroizing<V
 
     Aes256Gcm::new(key.into())
         .decrypt_inout_detached(nonce, header, body.into(), tag)
-        .map_err(|_| {
-            "authentication failed: wrong key, or the file is corrupted or has been tampered with"
-                .to_string()
-        })?;
+        .map_err(|_| AUTH_FAILED.to_string())?;
 
-    blob.copy_within(HEADER_LEN..HEADER_LEN + body_len, 0);
-    blob.truncate(body_len);
-    Ok(blob)
+    let (metadata, skip) = match version {
+        1 => (None, 0),
+        _ => {
+            let (metadata, len) = Metadata::parse(&blob[HEADER_LEN..HEADER_LEN + body_len])?;
+            (Some(metadata), len)
+        }
+    };
+    blob.copy_within(HEADER_LEN + skip..HEADER_LEN + body_len, 0);
+    blob.truncate(body_len - skip);
+    Ok((metadata, blob))
 }
 
-fn check_header(bytes: &[u8]) -> Result<()> {
+/// Checks the magic bytes and returns the format version.
+fn check_header(bytes: &[u8]) -> Result<u8> {
     if bytes.len() < HEADER_LEN || bytes[..MAGIC.len()] != MAGIC[..] {
         return Err("not a file encrypted by this tool (missing AGCM header)".into());
     }
     match bytes[NONCE_START - 1] {
-        VERSION => Ok(()),
-        v => Err(format!("unsupported encrypted file version {v}")),
+        v @ 1..=VERSION => Ok(v),
+        v => Err(explain::unsupported_version(v)),
     }
 }
 
+/// Checks that the file on disk decrypts back to the original contents, and
+/// that its metadata reads back too.
 fn verify_encrypted(key: &[u8; KEY_LEN], path: &Path, len: usize, hash: &[u8; 32]) -> Result<()> {
-    let plain = open(key, read_file(path)?).map_err(|e| format!("verification failed: {e}"))?;
+    let (_, plain) = open(key, read_file(path)?).map_err(|e| format!("verification failed: {e}"))?;
     if plain.len() != len || *sha256(&plain) != *hash {
         return Err("verification failed: decrypted file does not match the original".into());
     }
@@ -569,11 +697,12 @@ fn sha256(data: &[u8]) -> Zeroizing<[u8; 32]> {
 }
 
 fn sha256_file(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
-    let mut file = open_no_follow(path).map_err(|e| open_error(path, e))?;
+    let read_error = |e| explain::file(Action::Read, path, &e);
+    let mut file = open_no_follow(path).map_err(read_error)?;
     let mut buf = secret_buffer(1 << 16)?;
     let mut hasher = Sha256::new();
     loop {
-        let n = file.read(&mut buf).map_err(|e| read_error(path, e))?;
+        let n = file.read(&mut buf).map_err(read_error)?;
         if n == 0 {
             break;
         }
@@ -586,53 +715,60 @@ fn sha256_file(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
 // Files
 // ---------------------------------------------------------------------------
 
-fn regular_file_len(path: &Path) -> Result<u64> {
-    let meta =
-        fs::symlink_metadata(path).map_err(|e| format!("cannot open {}: {e}", safe_path(path)))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "{} is a symbolic link; give the path of the file it points to",
-            safe_path(path)
-        ));
+/// The size of the file `command` was given, if it's a regular file, or an
+/// explanation of why it can't be used.
+fn input_len(command: &str, path: &Path) -> Result<u64> {
+    let meta = fs::symlink_metadata(path).map_err(|e| explain::missing(command, path, &e))?;
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        return Err(explain::symlink(command, path));
     }
-    if !meta.is_file() {
-        return Err(format!("{} is not a regular file", safe_path(path)));
+    if kind.is_dir() {
+        return Err(match command {
+            "encrypt" => explain::zip_instead(&[path.to_string_lossy().into_owned()]),
+            _ => explain::decrypt_folder(path),
+        });
+    }
+    if !kind.is_file() {
+        return Err(explain::special(path, kind));
     }
     Ok(meta.len())
+}
+
+/// Fails, explaining why, if `path` couldn't be created in its folder.
+fn check_writable(path: &Path) -> Result<()> {
+    let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let folder = std::ffi::CString::new(folder.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    // SAFETY: access only reads the NUL-terminated path.
+    if unsafe { libc::access(folder.as_ptr(), libc::W_OK | libc::X_OK) } == 0 {
+        return Ok(());
+    }
+    Err(explain::file(Action::Create, path, &io::Error::last_os_error()))
 }
 
 fn open_no_follow(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)
 }
 
-fn open_error(path: &Path, e: io::Error) -> String {
-    if e.raw_os_error() == Some(libc::ELOOP) {
-        format!("{} was replaced by a symbolic link; not touching it", safe_path(path))
-    } else {
-        format!("cannot open {}: {e}", safe_path(path))
-    }
-}
-
-fn read_error(path: &Path, e: io::Error) -> String {
-    format!("cannot read {}: {e}", safe_path(path))
-}
-
 /// A zeroed buffer for plaintext and other secrets: allocated at its final
 /// size so it never reallocates and leaves copies behind, locked in RAM when
 /// the limit allows, and wiped when dropped.
 fn secret_buffer(len: u64) -> Result<Zeroizing<Vec<u8>>> {
-    let len = usize::try_from(len).map_err(|_| "file is too large to load".to_string())?;
-    let buf = Zeroizing::new(vec![0u8; len]);
-    protect::lock(buf.as_ptr(), len);
+    let size = usize::try_from(len).map_err(|_| explain::no_memory(len))?;
+    let mut buf = Zeroizing::new(Vec::new());
+    buf.try_reserve_exact(size).map_err(|_| explain::no_memory(len))?;
+    buf.resize(size, 0);
+    protect::lock(buf.as_ptr(), size);
     Ok(buf)
 }
 
 /// Reads a whole file, refusing symlinks, into a secret buffer.
 fn read_file(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
-    let mut file = open_no_follow(path).map_err(|e| open_error(path, e))?;
-    let len = file.metadata().map_err(|e| read_error(path, e))?.len();
+    let read_error = |e| explain::file(Action::Read, path, &e);
+    let mut file = open_no_follow(path).map_err(read_error)?;
+    let len = file.metadata().map_err(read_error)?.len();
     let mut buf = secret_buffer(len)?;
-    file.read_exact(&mut buf).map_err(|e| read_error(path, e))?;
+    file.read_exact(&mut buf).map_err(read_error)?;
     Ok(buf)
 }
 
@@ -650,7 +786,7 @@ fn write_file(path: &Path, parts: &[&[u8]], replace: bool) -> Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&tmp)
-        .map_err(|e| format!("cannot create {}: {e}", safe_path(&tmp)))?;
+        .map_err(|e| explain::file(Action::Create, path, &e))?;
     let written = parts
         .iter()
         .try_for_each(|part| file.write_all(part))
@@ -658,7 +794,7 @@ fn write_file(path: &Path, parts: &[&[u8]], replace: bool) -> Result<()> {
         .and_then(|()| fs::rename(&tmp, path));
     if let Err(e) = written {
         let _ = wipe::shred(&tmp);
-        return Err(format!("cannot write {}: {e}", safe_path(path)));
+        return Err(explain::file(Action::Write, path, &e));
     }
     Ok(())
 }
@@ -703,13 +839,15 @@ fn choose<'a>(question: &str, options: &[&'a str]) -> Result<&'a str> {
     }
 }
 
-fn file_path(arg: Option<&str>, prompt: &str) -> Result<PathBuf> {
+/// The file `command` works on: the one given on the command line, or else
+/// one typed at a prompt.
+fn file_path(command: &str, arg: Option<&str>) -> Result<PathBuf> {
     match arg {
         Some(arg) => Ok(PathBuf::from(arg)),
         None => {
-            let raw = term::read_line(prompt)?;
+            let raw = term::read_line(&format!("File to {command}: "))?;
             if raw.is_empty() {
-                return Err("no file given".into());
+                return Err(explain::no_file_given(command));
             }
             Ok(clean_path(&raw))
         }
@@ -764,10 +902,16 @@ mod tests {
         Box::new(Zeroizing::new([byte; KEY_LEN]))
     }
 
-    fn encrypt(key: &[u8; KEY_LEN], plain: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut data = plain.to_vec();
+    fn encrypt_with(key: &[u8; KEY_LEN], metadata: &Metadata, plain: &[u8]) -> Zeroizing<Vec<u8>> {
+        let mut data = vec![0; metadata.encoded_len()];
+        metadata.encode(&mut data);
+        data.extend_from_slice(plain);
         let (header, tag) = seal(key, &mut data).unwrap();
         Zeroizing::new([&header[..], &data, &tag].concat())
+    }
+
+    fn encrypt(key: &[u8; KEY_LEN], plain: &[u8]) -> Zeroizing<Vec<u8>> {
+        encrypt_with(key, &Metadata::default(), plain)
     }
 
     #[test]
@@ -776,9 +920,48 @@ mod tests {
         for len in [0, 1, 15, 16, 17, 4096, 100_003] {
             let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             let blob = encrypt(&k, &plain);
-            assert_eq!(blob.len(), HEADER_LEN + len + TAG_LEN);
-            assert_eq!(&open(&k, blob).unwrap()[..], &plain[..]);
+            assert_eq!(blob.len(), HEADER_LEN + 4 + len + TAG_LEN);
+            assert_eq!(&open(&k, blob).unwrap().1[..], &plain[..]);
         }
+    }
+
+    #[test]
+    fn carries_metadata_inside_the_encryption() {
+        let path = std::env::temp_dir().join(format!("aes256-carry-{}", std::process::id()));
+        fs::write(&path, b"contents").unwrap();
+        let metadata = Metadata::capture(&File::open(&path).unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let blob = encrypt_with(&key(8), &metadata, b"contents");
+        assert!(!blob.windows(8).any(|w| w == b"contents"), "contents visible");
+        let (stored, plain) = open(&key(8), blob).unwrap();
+        assert_eq!(stored, Some(metadata));
+        assert_eq!(&plain[..], b"contents");
+    }
+
+    #[test]
+    fn opens_version_1_files_without_metadata() {
+        let k = key(9);
+        let raw: &[u8; KEY_LEN] = &k;
+        let mut blob = [&MAGIC[..], &[1], &[7; NONCE_LEN]].concat();
+        let mut body = b"made by 0.1".to_vec();
+        let nonce = <&Nonce<Aes256Gcm>>::try_from(&blob[NONCE_START..]).unwrap();
+        let tag = Aes256Gcm::new(raw.into())
+            .encrypt_inout_detached(nonce, &blob, body.as_mut_slice().into())
+            .unwrap();
+        blob.extend_from_slice(&body);
+        blob.extend_from_slice(&tag);
+
+        let (stored, plain) = open(&k, Zeroizing::new(blob)).unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(&plain[..], b"made by 0.1");
+    }
+
+    #[test]
+    fn refuses_versions_it_does_not_know() {
+        let mut blob = encrypt(&key(1), b"x");
+        blob[NONCE_START - 1] = VERSION + 1;
+        assert!(open(&key(1), blob).unwrap_err().contains("made by a newer version of encryptor"));
     }
 
     #[test]
@@ -813,13 +996,18 @@ mod tests {
     #[test]
     fn parses_hex_keys() {
         let hex = "00112233445566778899aabbccddeeffFFEEDDCCBBAA99887766554433221100";
-        let k = parse_key(hex).unwrap();
-        assert_eq!(k[0], 0x00);
-        assert_eq!(k[15], 0xff);
-        assert_eq!(k[16], 0xff);
-        assert!(parse_key(&hex[1..]).is_err());
-        assert!(parse_key("").is_err());
-        assert!(parse_key("not a key").is_err());
+        let (k, key_file) = parse_key(hex).unwrap();
+        assert_eq!((k[0], k[15], k[16], key_file), (0x00, 0xff, 0xff, None));
+        assert!(parse_key(&hex[1..]).unwrap_err().contains("That's 1 short"));
+        assert!(parse_key("").unwrap_err().starts_with("nothing was entered"));
+        assert!(parse_key("not a key").unwrap_err().starts_with("that isn't a key or a key file"));
+        // Mistakes are described without repeating the input.
+        let spaced = format!("{} {}", &hex[..32], &hex[32..]);
+        assert_eq!(parse_key(&spaced).unwrap_err(), "that key has spaces in it. Enter just its 64 characters of 0-9 and a-f.");
+        let mut typo = hex.to_string();
+        typo.replace_range(9..10, "O");
+        let e = parse_key(&typo).unwrap_err();
+        assert!(e.contains("character 10 is the letter O") && !e.contains(&typo[..9]), "{e}");
     }
 
     #[test]
@@ -831,8 +1019,12 @@ mod tests {
         fs::write(&good, [9u8; KEY_LEN]).unwrap();
         fs::write(&bad, [9u8; KEY_LEN - 1]).unwrap();
 
-        assert_eq!(**parse_key(good.to_str().unwrap()).unwrap(), [9u8; KEY_LEN]);
-        assert!(parse_key(bad.to_str().unwrap()).unwrap_err().contains("exactly 32 bytes"));
+        let (k, key_file) = parse_key(good.to_str().unwrap()).unwrap();
+        assert_eq!((**k, key_file), ([9u8; KEY_LEN], Some(good.clone())));
+        assert!(parse_key(bad.to_str().unwrap()).unwrap_err().contains("key files are exactly 32 bytes"));
+        let missing = dir.join("missing.key");
+        assert!(parse_key(missing.to_str().unwrap()).unwrap_err().starts_with("there's no key file at"));
+        assert!(parse_key(dir.to_str().unwrap()).unwrap_err().contains("is a folder, not a key file"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

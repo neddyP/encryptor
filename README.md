@@ -29,6 +29,11 @@ See [Install](#install) for details, including permission errors.
   alternate screen, which keeps no scrollback, and is erased when you press
   Enter. It is written straight to the terminal, never to standard output, so
   redirecting the output to a file can't capture it.
+- **Warned before printing into a recording.** Before printing a key, the
+  tool looks for anything that would capture it, such as `script`,
+  `asciinema`, a terminal sharing tool, tmux `pipe-pane` or a tracer. If it
+  finds one, it names it, with its PID and the file it writes to, warns that
+  printing would compromise the encryption, and asks whether to print anyway.
 - **Verified before anything is deleted.** After encrypting, the new file is
   read back from disk and decrypted, and its SHA-256 is compared with the
   original. The original is deleted only if they match.
@@ -53,6 +58,16 @@ See [Install](#install) for details, including permission errors.
 - **Safe to interrupt.** Ctrl-C at any point stops cleanly: keys are wiped,
   unused key files and partial output are shredded, and the original is left
   untouched unless encryption had already been verified.
+- **Metadata comes back too.** Permissions, timestamps, owner and extended
+  attributes (which hold ACLs on Linux, and Finder tags and download
+  quarantine on macOS) are stored inside the encryption, so they don't leak,
+  and put back on the decrypted file. Any file type works: the tool only sees
+  bytes.
+- **Errors that say how to fix them.** A missing file suggests the one you
+  probably meant, a full or read-only disk or a FAT32 size limit is named as
+  such, a file that isn't encrypted is identified (a zip, a PDF, or a file
+  from OpenSSL, GPG or age), and a mistyped key is described without being
+  shown. Suggested commands use your own file names, ready to paste.
 - **Crash-safe writes.** Output goes to a temporary file that is renamed into
   place, so a half-written file never appears under the final name.
 
@@ -146,6 +161,23 @@ If you leave out `FILE`, you're asked for it. Typed paths may be quoted or
 start with `~/`, so you can drag a file into the terminal. `encrypt --help`
 prints the usage.
 
+`encrypt` takes one file at a time. To encrypt a folder or several files, zip
+them into a single file first. Given a folder or more than one file, `encrypt`
+prints the commands to do this, using your own names:
+
+```
+$ encrypt photos
+error: photos is a folder.
+encrypt can't encrypt folders or multiple files, only one file at a time.
+Zip them into a single file, then encrypt that:
+
+  Zip the folder:    zip -r photos.zip photos
+  Encrypt the zip:   encrypt photos.zip
+
+encrypt deletes the zip once it's encrypted, but not the originals: delete
+them yourself once you've checked the encrypted file.
+```
+
 ### Encrypting
 
 ```
@@ -168,8 +200,9 @@ Encrypt using AES-256-GCM? [y/n]: y
   Nonce          96-bit, random
   Auth tag       128-bit
   Input          report.pdf  1258291 bytes (1.2 MiB)
-  Output         report.pdf.enc  1258324 bytes (1.2 MiB)
-  Overhead       33 bytes (17 header + 16 tag)
+  Output         report.pdf.enc  1258401 bytes (1.2 MiB)
+  Overhead       110 bytes (17 header + 77 metadata + 16 tag)
+  Metadata       stored encrypted: permissions 644, owner 1000:1000, accessed, modified and created times
   Integrity      verified: re-read from disk, decrypted, SHA-256 matches original
   Original       overwritten with zeros, name scrambled, then deleted
   Key and data   kept in RAM (never swapped), wiped after use
@@ -187,9 +220,10 @@ The prompts go in this order:
 3. **Print the key?** `y` shows it once as 64 hex characters on the
    terminal's alternate screen; press Enter when you've copied it and it's
    erased. Printing needs an interactive terminal and is refused when there
-   isn't one, or when the session is being recorded (asciinema) or run inside
-   GNU screen, which may keep it in scrollback. You can answer `y` to both
-   questions to keep two copies.
+   isn't one. If [something is recording the
+   session](#when-the-session-is-being-recorded), you're told what and asked
+   whether to print anyway. You can answer `y` to both questions to keep two
+   copies.
 
    If you answer `n` to both, you're warned that the key would be lost (and
    the file with it) and asked `Print or save the key? [p/s]` until you
@@ -198,6 +232,44 @@ The prompts go in this order:
    it never encrypted anything.
 
 If `FILE.enc` already exists, the tool refuses to run rather than overwrite it.
+
+### When the session is being recorded
+
+Asked to print a key, the tool first checks whether anything would capture
+it. If so, it says exactly what, and asks before printing:
+
+```
+Print the key? [y/n]: y
+
+WARNING: something is recording or sharing this terminal session:
+  - script (PID 4242): records the terminal session
+      writing to /home/you/typescript
+Printing the key would save it to script compromising your encryption, do you still wish to print your decryption key? [y/n]: n
+Key not printed.
+```
+
+`y` prints it anyway, into the recording, and the final report says the key
+was captured and by what, rather than that it was erased. `n` leaves it
+unprinted, and if the key hasn't been saved either, you're then asked to
+print or save it.
+
+It looks for:
+
+- **Recorders and logging shells** the session runs inside: `script`,
+  `asciinema`, `ttyrec`, `termrec`, tlog, Terminalizer, VHS, `t-rec`,
+  `rootsh` and `sudosh`. `script` writing to `/dev/null`, a common way to get
+  a terminal without recording anything, doesn't count.
+- **Terminal sharing:** tmate, tty-share, upterm, sshx, ttyd and GoTTY.
+- **GNU screen**, which keeps what the key is shown on in its scrollback.
+- **tmux** `pipe-pane` on the current pane (which tmux-logging uses), and
+  recorders around any tmux client attached to the session. tmux itself keeps
+  no copy of a printed key.
+- **Debuggers and tracers** such as `strace` and `gdb` attached to the tool
+  (Linux only).
+
+On Linux the warning also lists the files each one is writing to. Some
+recorders can't be seen from inside the session; see
+[Security notes](#security-notes).
 
 ### Decrypting
 
@@ -212,9 +284,10 @@ Decrypt using AES-256-GCM? [y/n]: y
   Cipher         AES-256-GCM (authenticated encryption)
   Key            256-bit
   Auth tag       128-bit, valid: file is authentic and uncorrupted
-  Input          report.pdf.enc  1258324 bytes (1.2 MiB) (kept)
+  Input          report.pdf.enc  1258401 bytes (1.2 MiB) (kept)
   Output         report.pdf  1258291 bytes (1.2 MiB)
   Integrity      verified: re-read from disk, SHA-256 matches decrypted data
+  Metadata       restored permissions 644, accessed and modified times; not restored: created time (this system can't set it)
   Key and data   kept in RAM (never swapped), wiped after use
   Shell history  key not found in shell history
   Time           10.90ms
@@ -229,11 +302,36 @@ The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
 overwritten. The encrypted file is kept.
 
+The decrypted file gets the original's metadata back, and the report lists
+anything that couldn't be restored:
+
+- **Permissions, and access and modification times**, to the nanosecond.
+- **Extended attributes**, including POSIX ACLs on Linux, and Finder tags and
+  the download quarantine flag on macOS.
+- **Creation time** on macOS. Linux has no way to set it.
+- **Owner and group**, as far as your account allows. Only root can give a
+  file to another user, and you can only give a file to one of your own
+  groups.
+- **Setuid, setgid and file capabilities** only along with the original
+  owner, as `cp -p` does, so nobody can be handed a program that runs with
+  someone else's privileges.
+
+On macOS, ACLs and file flags (such as hidden or locked) aren't kept.
+
+Files encrypted by versions before 2.0 hold no metadata. They still decrypt,
+and the report says none was stored.
+
 A wrong key and a damaged or tampered file produce the same error, because
-GCM can't tell them apart. Nothing is written in either case:
+GCM can't tell them apart. Nothing is written in either case, and the error
+says what to check, including when the key file is named for a different
+file:
 
 ```
-error: authentication failed: wrong key, or the file is corrupted or has been tampered with
+error: authentication failed: wrong key, or the file is corrupted or has been tampered with.
+Nothing was written.
+- You used the key file photo.jpg.key, but the key for report.pdf.enc is usually report.pdf.key.
+- Check it's this file's key: every generated key is different, even for the same file encrypted twice.
+- If the key is right, report.pdf.enc was changed or damaged after it was encrypted, for example by an incomplete copy or download. Try another copy of it.
 ```
 
 ### Scripting
@@ -257,22 +355,52 @@ Printing a key isn't possible without an interactive terminal.
 | Offset | Size | Contents                                  |
 | ------ | ---- | ----------------------------------------- |
 | 0      | 4    | Magic bytes `AGCM`                        |
-| 4      | 1    | Format version (`1`)                      |
+| 4      | 1    | Format version (`2`)                      |
 | 5      | 12   | Nonce, random per file                    |
 | 17     | n    | Ciphertext (same length as the plaintext) |
 | 17 + n | 16   | GCM authentication tag                    |
 
 The 17-byte header is passed to GCM as associated data, so it is
-authenticated along with the ciphertext. The format is plain AES-256-GCM and
-can be decrypted by any standard implementation. For example, with Python's
-`cryptography` package:
+authenticated along with the ciphertext.
+
+The plaintext starts with the original file's metadata, so it is encrypted
+and authenticated along with the contents:
+
+| Size | Contents                                  |
+| ---- | ----------------------------------------- |
+| 4    | Length `m` of the metadata records        |
+| m    | Metadata records                          |
+| rest | The file's contents                       |
+
+Each record is a 1-byte tag, a 4-byte length and the value. Numbers are
+little-endian. Records with unknown tags are skipped.
+
+| Tag | Value                                                         |
+| --- | ------------------------------------------------------------- |
+| 1   | Permission bits, including setuid, setgid and sticky (u32)    |
+| 2   | Owner and group IDs (u32, u32)                                |
+| 3   | Access time: seconds since 1970 (i64), then nanoseconds (u32) |
+| 4   | Modification time, as for tag 3                               |
+| 5   | Creation time, as for tag 3                                   |
+| 6   | Extended attribute: name, a zero byte, then the value         |
+
+Version 1 files, made by versions of encryptor before 2.0, have no metadata:
+the plaintext is just the contents. 2.0 and later read both, but earlier
+versions can't read version 2.
+
+The format is plain AES-256-GCM and can be decrypted by any standard
+implementation. For example, with Python's `cryptography` package:
 
 ```python
+import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 blob = open("report.pdf.enc", "rb").read()
 key = open("report.pdf.key", "rb").read()
 plaintext = AESGCM(key).decrypt(blob[5:17], blob[17:], blob[:17])
+if blob[4] >= 2:  # skip the metadata
+    (length,) = struct.unpack_from("<I", plaintext)
+    plaintext = plaintext[4 + length:]
 ```
 
 ## Security notes
@@ -286,18 +414,25 @@ plaintext = AESGCM(key).decrypt(blob[5:17], blob[17:], blob[:17])
 - **Large files can reach swap.** Keys are always locked in RAM, but the
   system's memory-lock limit (often 8 MiB) caps how much plaintext can be.
   The report says which applied. Encrypted swap, or no swap, covers the rest.
-- **Outside recorders can't be wiped.** Terminal recording or logging set up
-  outside the tool (`script`, terminal emulator session logs, tmux
-  `pipe-pane`) captures a printed key as it's displayed, and the tool can't
-  know where those logs are. Save the key instead of printing it when a
-  session might be recorded.
+- **Not every recorder can be detected.** Terminal emulator session logs
+  (such as iTerm2's automatic logging), recorders on the machine you
+  connected from over SSH, sudo I/O logs and kernel keystroke auditing
+  (`pam_tty_audit`) can't be seen from inside the session, and would capture
+  a printed key. Save the key instead of printing it when a session might be
+  recorded.
 - **Whole files are processed in memory.** You need free RAM at least the size
   of the file. AES-GCM limits a single file to 64 GiB.
 - **Keys are raw 256-bit values, not passwords.** There's no password-based
   key derivation, so use generated keys rather than typing in something
   memorable.
-- **Files the tool creates are owner-only** (mode `600`). Symlinks are
-  rejected as input, so the tool never overwrites the file a link points to.
+- **Files the tool creates are owner-only** (mode `600`): encrypted files,
+  key files, and decrypted files until they have been verified. A decrypted
+  file then gets the original's permissions back, which may let others read
+  it if the original did. Symlinks are rejected as input, so the tool never
+  overwrites the file a link points to.
+- **Metadata is encrypted, but the size isn't.** An encrypted file is the
+  original's size plus 33 bytes plus the metadata, and its name is the
+  original's with `.enc` added.
 - `.gitignore` excludes `*.key`, so key files saved inside the repo can't be
   committed by accident.
 
@@ -310,12 +445,16 @@ cargo test --release
 The tests cover round trips at several sizes, wrong-key rejection, detection
 of a change to any single byte, truncation, nonce uniqueness, key parsing,
 overwriting and deleting files (including when a file is swapped for a
-symlink part way through), history redaction, and escaping of untrusted file
-names.
+symlink part way through), history redaction, escaping of untrusted file
+names, recognising recorders and the files they write to, storing and restoring
+metadata (including reading files from earlier versions), and the advice in
+error messages.
 
 The code is in `src/`: `main.rs` has the commands and crypto, `protect.rs`
 the process hardening and memory locking, `term.rs` the terminal input and
-output, and `wipe.rs` secure deletion and history redaction. It uses the
+output, `recording.rs` the search for anything recording the session,
+`meta.rs` the stored metadata, `explain.rs` the error messages, and `wipe.rs`
+secure deletion and history redaction. It uses the
 RustCrypto [`aes-gcm`](https://crates.io/crates/aes-gcm) and
 [`sha2`](https://crates.io/crates/sha2) crates,
 [`zeroize`](https://crates.io/crates/zeroize) for wiping secrets,
