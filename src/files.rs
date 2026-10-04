@@ -220,9 +220,20 @@ impl Drop for PartFile {
 fn swap(a: &Path, b: &Path) -> io::Result<()> {
     let a = CString::new(a.as_os_str().as_bytes())?;
     let b = CString::new(b.as_os_str().as_bytes())?;
-    // SAFETY: both paths are NUL-terminated and outlive the call.
+    // SAFETY: both paths are NUL-terminated and outlive the call. Linux's
+    // renameat2 is made as a system call, since the musl C library the static
+    // release builds use may not have a function for it.
     #[cfg(target_os = "linux")]
-    let done = unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_EXCHANGE) };
+    let done = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
     #[cfg(target_os = "macos")]
     let done = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

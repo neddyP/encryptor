@@ -350,7 +350,11 @@ fn outputs(pid: u32) -> Option<Vec<Output>> {
             let flags = info.lines().find_map(|line| line.strip_prefix("flags:"))?;
             u32::from_str_radix(flags.trim(), 8).ok()
         });
-        if flags.is_some_and(|flags| flags & libc::O_ACCMODE as u32 == libc::O_RDONLY as u32) {
+        // Without its details the descriptor has just been closed, as happens
+        // while a program is starting up; one opened only for reading writes
+        // nothing.
+        let Some(flags) = flags else { continue };
+        if flags & libc::O_ACCMODE as u32 == libc::O_RDONLY as u32 {
             continue;
         }
         let target = target.as_os_str().as_bytes();
