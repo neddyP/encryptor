@@ -1,6 +1,6 @@
 [package]
 name = "encryptor"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 description = "Encrypt and decrypt files with AES-256-GCM from the command line"
 license = "MIT"
