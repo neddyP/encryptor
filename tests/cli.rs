@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 
 const BIN: &str = env!("CARGO_BIN_EXE_encryptor");
 const PIPE_NOTE: &str = "answering questions through a pipe stops working in 3.0";
@@ -42,7 +43,7 @@ impl Scratch {
     }
 
     fn run_as(&self, program: &std::path::Path, args: &[&str], stdin: &str) -> Run {
-        let mut child = Command::new(program)
+        let mut child = launcher(program)
             .args(args)
             .current_dir(&self.0)
             .env("HOME", &self.0)
@@ -71,6 +72,48 @@ impl Drop for Scratch {
     }
 }
 
+/// How to start the binary. Built for another processor, as when `cross`
+/// tests arm64 on x64, it can't be run directly, so it goes through the same
+/// emulator the tests run under, which cross names in a
+/// CARGO_TARGET_*_RUNNER variable.
+fn launcher(program: &std::path::Path) -> Command {
+    match how_to_run() {
+        Some(Some(runner)) => {
+            let mut parts = runner.split_whitespace();
+            let mut command = Command::new(parts.next().expect("a runner names a program"));
+            command.args(parts).arg(program);
+            command
+        }
+        _ => Command::new(program),
+    }
+}
+
+/// `Some(None)` if the binary runs directly, `Some(Some(runner))` if it
+/// runs through an emulator, and `None` if it can't be run here at all.
+fn how_to_run() -> &'static Option<Option<String>> {
+    static HOW: OnceLock<Option<Option<String>>> = OnceLock::new();
+    HOW.get_or_init(|| {
+        if Command::new(BIN).arg("--version").output().is_ok() {
+            return Some(None);
+        }
+        let runner = std::env::vars()
+            .find(|(name, _)| name.starts_with("CARGO_TARGET_") && name.ends_with("_RUNNER"))
+            .map(|(_, runner)| runner);
+        match runner {
+            Some(runner) => Some(Some(runner)),
+            None => {
+                eprintln!("skipping: {BIN} can't be run here, directly or through an emulator");
+                None
+            }
+        }
+    })
+}
+
+/// Whether these tests can run the binary at all.
+fn runnable() -> bool {
+    how_to_run().is_some()
+}
+
 struct Run(Output);
 
 impl Run {
@@ -89,6 +132,9 @@ impl Run {
 
 #[test]
 fn round_trips_with_options_and_asks_nothing() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("round-trip");
     let contents: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     dir.write("report.pdf", &contents);
@@ -107,6 +153,9 @@ fn round_trips_with_options_and_asks_nothing() {
 
 #[test]
 fn saves_a_new_key_into_a_folder() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("key-folder");
     fs::create_dir(dir.path("keys")).unwrap();
     dir.write("notes.txt", b"notes");
@@ -116,6 +165,9 @@ fn saves_a_new_key_into_a_folder() {
 
 #[test]
 fn refuses_to_save_a_new_key_over_another_file() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("key-taken");
     dir.write("notes.txt", b"notes");
     dir.write("taken.key", b"something else");
@@ -128,6 +180,9 @@ fn refuses_to_save_a_new_key_over_another_file() {
 
 #[test]
 fn keeps_the_original_and_stays_quiet_when_asked() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("keep");
     dir.write("photo.jpg", b"pixels");
     let run = dir.run(&["encrypt", "photo.jpg", "--new-key", "photo.key", "--keep", "-y", "-q"], "");
@@ -139,6 +194,9 @@ fn keeps_the_original_and_stays_quiet_when_asked() {
 
 #[test]
 fn writes_the_decrypted_file_where_asked() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("output");
     dir.write("data.bin", b"data");
     dir.encrypt("data.bin", "data.key");
@@ -150,6 +208,9 @@ fn writes_the_decrypted_file_where_asked() {
 
 #[test]
 fn never_takes_overwriting_from_a_pipe() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("overwrite");
     dir.write("report.txt", b"secret");
     dir.encrypt("report.txt", "report.key");
@@ -168,6 +229,9 @@ fn never_takes_overwriting_from_a_pipe() {
 
 #[test]
 fn reads_keys_as_hex_text_and_from_a_pipe() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("hex-key");
     dir.write("a.txt", b"contents of a");
     dir.encrypt("a.txt", "a.key");
@@ -186,6 +250,9 @@ fn reads_keys_as_hex_text_and_from_a_pipe() {
 
 #[test]
 fn exits_with_a_status_scripts_can_act_on() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("codes");
     dir.write("a.txt", b"a");
     dir.encrypt("a.txt", "a.key");
@@ -204,6 +271,9 @@ fn exits_with_a_status_scripts_can_act_on() {
 
 #[test]
 fn still_takes_piped_answers_but_says_they_are_going() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("piped");
     dir.write("old.txt", b"old style");
     // Generate a key, save it, don't print it, encrypt.
@@ -219,6 +289,9 @@ fn still_takes_piped_answers_but_says_they_are_going() {
 
 #[test]
 fn answers_to_its_names() {
+    if !runnable() {
+        return;
+    }
     let dir = Scratch::new("names");
     let link = |name: &str| {
         let path = dir.path(name);
