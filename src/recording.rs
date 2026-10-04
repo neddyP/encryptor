@@ -43,7 +43,9 @@ const KNOWN: &[(&str, &str)] = &[
 ];
 
 /// Recorders written in Python or JavaScript. They run under an interpreter,
-/// so they show up as its first argument rather than by name.
+/// so they show up as its first argument rather than by name. Only Linux
+/// shows this program the arguments of other processes.
+#[cfg(target_os = "linux")]
 const RUN_BY_INTERPRETER: &[&str] = &["asciinema", "terminalizer"];
 
 /// Ancestors checked before giving up, in case of a loop.
