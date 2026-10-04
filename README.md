@@ -276,7 +276,8 @@ The prompts go in this order:
    place on the disk. Overwriting the original then can't reach its old
    contents, which stay on the disk until the space is reused, and in any
    snapshots. Full-disk encryption (FileVault or LUKS) keeps them unreadable
-   without your password. `--yes` answers this too.
+   without your password. It's only asked at a terminal: with `--yes`, or in
+   a script, the warning is shown and encrypting goes ahead.
 1. **Generate a random key?** Answer `n` to enter your own key instead; the
    save and print questions are then skipped.
 2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
@@ -450,6 +451,10 @@ questions are therefore never answered from a pipe:
   stops with status 2 before giving the key.
 - **Printing a key while something records the session** is refused when no
   one is at the keyboard. `yes | encrypt` can't agree to it.
+
+Encrypting on a copy-on-write disk isn't asked about from a pipe either,
+since it's asked on some disks and not others: the warning is shown, and
+encrypting goes ahead as with `--yes`.
 
 A hex key piped in or typed into a command ends up in your shell's history.
 The tool removes it from your history files the next time that key is used,

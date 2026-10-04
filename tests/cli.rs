@@ -408,3 +408,21 @@ fn overwrites_a_read_only_original() {
     assert_eq!(dir.read("ro.txt"), b"read only");
     assert_eq!(fs::metadata(dir.path("ro.txt")).unwrap().permissions().mode() & 0o777, 0o444);
 }
+
+/// Every Mac disk is APFS, where the original's old contents can't be
+/// overwritten. Scripts are warned, but not asked, so piped answers still
+/// line up with the questions.
+#[cfg(target_os = "macos")]
+#[test]
+fn warns_a_script_about_a_copy_on_write_disk_without_asking() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("apfs");
+    dir.write("a.txt", b"a");
+    let run = dir.run(&["encrypt", "a.txt", "--new-key", "a.key"], "y\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("a.txt is on APFS"), "{}", run.stderr());
+    assert!(!run.stderr().contains("Encrypt anyway?"), "{}", run.stderr());
+    assert!(dir.exists("a.txt.enc") && !dir.exists("a.txt"));
+}

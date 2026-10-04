@@ -33,7 +33,10 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     }
     if let Some(filesystem) = files::copy_on_write(original.file()).filter(|_| !options.keep) {
         eprintln!("{}", explain::copy_on_write(&input, filesystem));
-        if !options.yes && !confirm("Encrypt anyway?")? {
+        // Only asked of someone at the keyboard: it's asked on some disks
+        // and not others, so answers piped in would land on the wrong
+        // questions. Scripts are warned, and carry on as with --yes.
+        if !options.yes && io::stdin().is_terminal() && !confirm("Encrypt anyway?")? {
             eprintln!("Cancelled; nothing was encrypted.");
             return Ok(());
         }
