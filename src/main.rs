@@ -11,8 +11,14 @@
 //! The 17-byte header is passed to GCM as associated data, so changing any
 //! byte of the header, ciphertext or tag makes decryption fail.
 
+mod protect;
+mod term;
+mod wipe;
+
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -22,6 +28,8 @@ use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{AeadInOut, KeyInit, Nonce, Tag};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+
+use term::{Shown, safe, safe_path};
 
 const MAGIC: &[u8; 4] = b"AGCM";
 const VERSION: u8 = 1;
@@ -47,19 +55,20 @@ Anything not given on the command line is asked for. When asked for a key,
 enter 64 hex characters or the path to a 32-byte key file.
 ";
 
-/// Key bytes live on the heap so moving the handle never copies the key, and
-/// are overwritten with zeros when dropped.
+/// Key bytes live on the heap, locked in RAM, so moving the handle never
+/// copies the key and it is never swapped out. They are zeroed when dropped.
 type SecretKey = Box<Zeroizing<[u8; KEY_LEN]>>;
 
 type Result<T> = std::result::Result<T, String>;
 
 enum KeySource {
     Generated { saved_to: Option<PathBuf>, printed: bool },
-    Entered,
+    Entered { history: String },
 }
 
-/// Deletes a freshly saved key file unless encryption completes, since a key
-/// that encrypted nothing is just clutter.
+/// Shreds a freshly saved key file unless encryption completes, including
+/// when the user stops part way: a key that encrypted nothing shouldn't be
+/// left on disk.
 struct UnusedKeyFile(Option<PathBuf>);
 
 impl UnusedKeyFile {
@@ -71,14 +80,16 @@ impl UnusedKeyFile {
 impl Drop for UnusedKeyFile {
     fn drop(&mut self) {
         if let Some(path) = &self.0 {
-            if fs::remove_file(path).is_ok() {
-                println!("Removed unused key file {}", path.display());
+            if wipe::shred(path).is_ok() {
+                println!("Shredded unused key file {}", safe_path(path));
             }
         }
     }
 }
 
 fn main() -> ExitCode {
+    protect::harden_process();
+
     let mut args = std::env::args();
     let program = args.next().unwrap_or_default();
     let mut args: Vec<String> = args.collect();
@@ -89,8 +100,14 @@ fn main() -> ExitCode {
         args.insert(0, name.to_owned());
     }
 
-    match run(&args) {
+    let result = run(&args);
+    protect::scrub_stack();
+    match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e == protect::INTERRUPTED => {
+            eprintln!("\ninterrupted; nothing was left behind");
+            ExitCode::from(130)
+        }
         Err(e) => {
             eprintln!("\nerror: {e}");
             ExitCode::FAILURE
@@ -110,7 +127,7 @@ fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("encrypt" | "enc" | "e") => encrypt_command(file),
         Some("decrypt" | "dec" | "d") => decrypt_command(file),
-        Some(other) => Err(format!("unknown command '{other}'\n\n{USAGE}")),
+        Some(other) => Err(format!("unknown command '{}'\n\n{USAGE}", safe(other))),
         None => match choose("Encrypt or decrypt?", &["encrypt", "decrypt"])? {
             "encrypt" => encrypt_command(None),
             _ => decrypt_command(None),
@@ -127,14 +144,11 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
     regular_file_len(&input)?;
     let output = with_suffix(&input, &format!(".{ENC_EXT}"));
     if output.exists() {
-        return Err(format!("{} already exists; move it out of the way first", output.display()));
+        return Err(format!("{} already exists; move it out of the way first", safe_path(&output)));
     }
 
-    let (key, source) = establish_key(&input)?;
-    let key_file = UnusedKeyFile(match &source {
-        KeySource::Generated { saved_to, .. } => saved_to.clone(),
-        KeySource::Entered => None,
-    });
+    let mut key_file = UnusedKeyFile(None);
+    let (key, source) = establish_key(&input, &mut key_file)?;
 
     if !confirm("Encrypt using AES-256-GCM?")? {
         println!("Cancelled; nothing was encrypted.");
@@ -142,10 +156,13 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
     }
 
     let started = Instant::now();
-    let mut data = read_file(&input)?;
-    if data.len() as u64 > aes_gcm::P_MAX {
+    let mut original = wipe::Original::open(&input).map_err(|e| open_error(&input, e))?;
+    let len = original.len().map_err(|e| read_error(&input, e))?;
+    if len > aes_gcm::P_MAX {
         return Err("file is larger than the 64 GiB AES-GCM limit".into());
     }
+    let mut data = secret_buffer(len)?;
+    original.read_exact(&mut data).map_err(|e| read_error(&input, e))?;
     let plain_len = data.len();
     let plain_hash = sha256(&data);
 
@@ -156,53 +173,62 @@ fn encrypt_command(file: Option<&str>) -> Result<()> {
     // Prove the file on disk decrypts back to exactly what was read before the
     // original is touched.
     if let Err(e) = verify_encrypted(&key, &output, plain_len, &plain_hash) {
-        let _ = fs::remove_file(&output);
-        return Err(format!("{e}\nremoved {} and left the original untouched", output.display()));
+        let _ = wipe::shred(&output);
+        return Err(format!("{e}\nremoved {} and left the original untouched", safe_path(&output)));
     }
     drop(key);
-    key_file.keep();
 
-    let original = shred_and_delete(&input);
+    // Last chance to back out: past this point the original is destroyed.
+    if protect::stop_requested() {
+        let _ = wipe::shred(&output);
+        return Err(protect::INTERRUPTED.into());
+    }
+    key_file.keep();
+    let original_status = original.destroy(&input);
     let elapsed = started.elapsed();
 
-    let (key_desc, storage) = match &source {
+    let mut rows = vec![("Cipher", "AES-256-GCM (authenticated encryption)".to_string())];
+    match &source {
         KeySource::Generated { saved_to, printed } => {
+            rows.push(("Key", "256-bit, generated by the OS CSPRNG".into()));
             let storage = match (saved_to, printed) {
                 (Some(path), false) => {
-                    format!("saved to {} (owner read/write only)", path.display())
+                    format!("saved to {} (owner read/write only)", safe_path(path))
                 }
-                (Some(path), true) => {
-                    format!("saved to {} (owner read/write only), also printed", path.display())
-                }
-                (None, _) => "printed once, not saved".to_string(),
+                (Some(path), true) => format!(
+                    "saved to {} (owner read/write only); also shown once on screen",
+                    safe_path(path)
+                ),
+                (None, _) => "shown once on screen, then erased; not saved".into(),
             };
-            ("256-bit, generated by the OS CSPRNG", storage)
+            rows.push(("Key storage", storage));
         }
-        KeySource::Entered => ("256-bit, entered by you", "not stored by this tool".to_string()),
-    };
-    print_report(
-        "ENCRYPTION SUCCESSFUL",
-        &[
-            ("Cipher", "AES-256-GCM (authenticated encryption)".into()),
-            ("Key", key_desc.into()),
-            ("Key storage", storage),
-            ("Nonce", format!("{}-bit, random", NONCE_LEN * 8)),
-            ("Auth tag", format!("{}-bit", TAG_LEN * 8)),
-            ("Input", format!("{}  {}", input.display(), fmt_size(plain_len))),
-            (
-                "Output",
-                format!("{}  {}", output.display(), fmt_size(HEADER_LEN + plain_len + TAG_LEN)),
-            ),
-            (
-                "Overhead",
-                format!("{} bytes ({HEADER_LEN} header + {TAG_LEN} tag)", HEADER_LEN + TAG_LEN),
-            ),
-            ("Integrity", "verified: re-read from disk, decrypted, SHA-256 matches original".into()),
-            ("Original", original),
-            ("Key in memory", "wiped (zeroized)".into()),
-            ("Time", format!("{elapsed:.2?}")),
-        ],
-    );
+        KeySource::Entered { .. } => {
+            rows.push(("Key", "256-bit, entered by you".into()));
+            rows.push(("Key storage", "not stored by this tool".into()));
+        }
+    }
+    rows.extend([
+        ("Nonce", format!("{}-bit, random", NONCE_LEN * 8)),
+        ("Auth tag", format!("{}-bit", TAG_LEN * 8)),
+        ("Input", format!("{}  {}", safe_path(&input), fmt_size(plain_len))),
+        (
+            "Output",
+            format!("{}  {}", safe_path(&output), fmt_size(HEADER_LEN + plain_len + TAG_LEN)),
+        ),
+        (
+            "Overhead",
+            format!("{} bytes ({HEADER_LEN} header + {TAG_LEN} tag)", HEADER_LEN + TAG_LEN),
+        ),
+        ("Integrity", "verified: re-read from disk, decrypted, SHA-256 matches original".into()),
+        ("Original", original_status),
+        ("Key and data", protect::memory_status().into()),
+    ]);
+    if let KeySource::Entered { history } = source {
+        rows.push(("Shell history", history));
+    }
+    rows.push(("Time", format!("{elapsed:.2?}")));
+    print_report("ENCRYPTION SUCCESSFUL", &rows);
     Ok(())
 }
 
@@ -212,23 +238,24 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
 
     // Reject files this tool didn't produce before asking for the key.
     if input_len < (HEADER_LEN + TAG_LEN) as u64 {
-        return Err(format!("{} is too short to be an encrypted file", input.display()));
+        return Err(format!("{} is too short to be an encrypted file", safe_path(&input)));
     }
     let mut header = [0u8; HEADER_LEN];
-    File::open(&input)
+    open_no_follow(&input)
         .and_then(|mut f| f.read_exact(&mut header))
-        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+        .map_err(|e| open_error(&input, e))?;
     check_header(&header)?;
     let output = decrypted_path(&input);
 
     let key = prompt_key(false)?;
+    let history = scrub_history(&key);
 
     if !confirm("Decrypt using AES-256-GCM?")? {
         println!("Cancelled; nothing was decrypted.");
         return Ok(());
     }
     let replace = output.exists();
-    if replace && !confirm(&format!("{} already exists. Overwrite it?", output.display()))? {
+    if replace && !confirm(&format!("{} already exists. Overwrite it?", safe_path(&output)))? {
         println!("Cancelled; nothing was written.");
         return Ok(());
     }
@@ -242,12 +269,16 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
     write_file(&output, &[&plain], replace)?;
     drop(plain);
 
-    if sha256_file(&output)? != plain_hash {
-        let _ = fs::remove_file(&output);
+    if *sha256_file(&output)? != *plain_hash {
+        let _ = wipe::shred(&output);
         return Err(format!(
             "{} did not read back correctly from disk and was removed",
-            output.display()
+            safe_path(&output)
         ));
+    }
+    if protect::stop_requested() {
+        let _ = wipe::shred(&output);
+        return Err(protect::INTERRUPTED.into());
     }
     let elapsed = started.elapsed();
 
@@ -257,10 +288,11 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
             ("Cipher", "AES-256-GCM (authenticated encryption)".into()),
             ("Key", "256-bit".into()),
             ("Auth tag", format!("{}-bit, valid: file is authentic and uncorrupted", TAG_LEN * 8)),
-            ("Input", format!("{}  {} (kept)", input.display(), fmt_size(input_len as usize))),
-            ("Output", format!("{}  {}", output.display(), fmt_size(plain_len))),
+            ("Input", format!("{}  {} (kept)", safe_path(&input), fmt_size(input_len as usize))),
+            ("Output", format!("{}  {}", safe_path(&output), fmt_size(plain_len))),
             ("Integrity", "verified: re-read from disk, SHA-256 matches decrypted data".into()),
-            ("Key in memory", "wiped (zeroized)".into()),
+            ("Key and data", protect::memory_status().into()),
+            ("Shell history", history),
             ("Time", format!("{elapsed:.2?}")),
         ],
     );
@@ -271,9 +303,11 @@ fn decrypt_command(file: Option<&str>) -> Result<()> {
 // Keys
 // ---------------------------------------------------------------------------
 
-fn establish_key(input: &Path) -> Result<(SecretKey, KeySource)> {
+fn establish_key(input: &Path, key_file: &mut UnusedKeyFile) -> Result<(SecretKey, KeySource)> {
     if !confirm("Generate a random 256-bit key?")? {
-        return Ok((prompt_key(true)?, KeySource::Entered));
+        let key = prompt_key(true)?;
+        let history = scrub_history(&key);
+        return Ok((key, KeySource::Entered { history }));
     }
 
     let key = generate_key()?;
@@ -281,12 +315,9 @@ fn establish_key(input: &Path) -> Result<(SecretKey, KeySource)> {
 
     let mut saved_to = None;
     if confirm("Save symmetric encryption key as a file in your current directory?")? {
-        saved_to = Some(save_key(&key, input)?);
+        saved_to = Some(save_key(&key, input, key_file)?);
     }
-    let mut printed = confirm("Print the key?")?;
-    if printed {
-        show_key(&key);
-    }
+    let mut printed = confirm("Print the key?")? && print_key(&key)?;
 
     // A key that is neither saved nor printed is gone once the program exits,
     // and the file with it, so one of the two is required.
@@ -294,35 +325,56 @@ fn establish_key(input: &Path) -> Result<(SecretKey, KeySource)> {
         println!();
         println!("WARNING: the key has been neither saved nor printed. It exists only in");
         println!("this program's memory, so the encrypted file could never be decrypted.");
-        if choose("Print or save the key?", &["print", "save"])? == "print" {
-            show_key(&key);
-            printed = true;
-        } else {
-            saved_to = Some(save_key(&key, input)?);
+        loop {
+            if choose("Print or save the key?", &["print", "save"])? == "save" {
+                saved_to = Some(save_key(&key, input, key_file)?);
+                break;
+            }
+            if print_key(&key)? {
+                printed = true;
+                break;
+            }
         }
     }
     Ok((key, KeySource::Generated { saved_to, printed }))
 }
 
-/// Saves the key in the working directory and tells the user where.
-fn save_key(key: &[u8; KEY_LEN], input: &Path) -> Result<PathBuf> {
+/// Saves the key in the working directory, tells the user where, and hands
+/// the file to `key_file` to shred if encryption doesn't complete.
+fn save_key(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Result<PathBuf> {
     let path = write_key_file(key, input)?;
+    key_file.0 = Some(path.clone());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    println!("Key saved as: {name}");
+    println!("Key saved as: {}", safe(&name));
     println!("Keep this file safe: anyone who has it can decrypt the file, and");
     println!("without the key the file cannot be decrypted.");
     Ok(path)
 }
 
-fn show_key(key: &[u8; KEY_LEN]) {
-    let hex = Zeroizing::new(hex::encode(key));
-    println!("\n    {}\n", hex.as_str());
-    println!("Store this key somewhere safe. It will not be shown again, and");
-    println!("without the key the file cannot be decrypted.");
+/// Shows the key on the terminal and erases it afterwards, or explains why it
+/// can't be shown here.
+fn print_key(key: &[u8; KEY_LEN]) -> Result<bool> {
+    match term::show_key(key)? {
+        Shown::Yes => {
+            println!("Key shown, then erased from the screen.");
+            Ok(true)
+        }
+        Shown::Unavailable(reason) => {
+            println!("  The key can't be printed here: {reason}.");
+            Ok(false)
+        }
+    }
+}
+
+/// Allocates a key buffer that is locked in RAM and zeroed when dropped.
+fn new_key() -> SecretKey {
+    let key: SecretKey = Box::new(Zeroizing::new([0u8; KEY_LEN]));
+    protect::lock(key.as_ptr(), KEY_LEN);
+    key
 }
 
 fn generate_key() -> Result<SecretKey> {
-    let mut key: SecretKey = Box::new(Zeroizing::new([0u8; KEY_LEN]));
+    let mut key = new_key();
     getrandom::fill(&mut key[..]).map_err(|e| format!("system random generator failed: {e}"))?;
     Ok(key)
 }
@@ -342,13 +394,13 @@ fn write_key_file(key: &[u8; KEY_LEN], input: &Path) -> Result<PathBuf> {
         match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(key).and_then(|()| file.sync_all()) {
-                    let _ = fs::remove_file(&path);
-                    return Err(format!("cannot write key file {}: {e}", path.display()));
+                    let _ = wipe::shred(&path);
+                    return Err(format!("cannot write key file {}: {e}", safe_path(&path)));
                 }
                 return Ok(path);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("cannot create key file {}: {e}", path.display())),
+            Err(e) => return Err(format!("cannot create key file {}: {e}", safe_path(&path))),
         }
     }
     Err("no free key file name in the working directory".into())
@@ -359,7 +411,7 @@ fn write_key_file(key: &[u8; KEY_LEN], input: &Path) -> Result<PathBuf> {
 /// would make the file unrecoverable.
 fn prompt_key(confirm_typed: bool) -> Result<SecretKey> {
     for _ in 0..3 {
-        let input = read_secret("Enter key (64 hex characters, or path to a key file): ")?;
+        let input = term::read_secret("Enter key (64 hex characters, or path to a key file): ")?;
         let key = match parse_key(&input) {
             Ok(key) => key,
             Err(e) => {
@@ -368,10 +420,15 @@ fn prompt_key(confirm_typed: bool) -> Result<SecretKey> {
             }
         };
         let typed = input.bytes().all(|b| b.is_ascii_hexdigit());
+        if typed && !io::stdin().is_terminal() {
+            eprintln!("note: the key came through a pipe. If you typed it into a shell");
+            eprintln!("command, run `history -c` in that shell before closing it, or the");
+            eprintln!("shell will save it to its history file when it exits.");
+        }
         if !confirm_typed || !typed {
             return Ok(key);
         }
-        let again = read_secret("Re-enter the key to confirm: ")?;
+        let again = term::read_secret("Re-enter the key to confirm: ")?;
         if parse_key(&again).is_ok_and(|k| *k == *key) {
             return Ok(key);
         }
@@ -381,9 +438,10 @@ fn prompt_key(confirm_typed: bool) -> Result<SecretKey> {
 }
 
 /// Accepts 64 hex characters or the path to a 32-byte binary key file. Error
-/// messages never echo the input, since it may be a mistyped key.
+/// messages never echo the input, since it may be a mistyped key, and the
+/// path built from it is wiped too.
 fn parse_key(input: &str) -> Result<SecretKey> {
-    let mut key: SecretKey = Box::new(Zeroizing::new([0u8; KEY_LEN]));
+    let mut key = new_key();
 
     if !input.is_empty() && input.bytes().all(|b| b.is_ascii_hexdigit()) {
         if input.len() != 2 * KEY_LEN {
@@ -397,9 +455,10 @@ fn parse_key(input: &str) -> Result<SecretKey> {
         return Ok(key);
     }
 
-    let path = clean_path(input);
+    let path_bytes = Zeroizing::new(clean_path(input).into_os_string().into_vec());
+    let path = Path::new(OsStr::from_bytes(&path_bytes));
     let invalid = || "not a valid key: expected 64 hex characters or the path to a key file".to_string();
-    let mut file = File::open(&path).map_err(|_| invalid())?;
+    let mut file = File::open(path).map_err(|_| invalid())?;
     let meta = file.metadata().map_err(|_| invalid())?;
     if !meta.is_file() {
         return Err(invalid());
@@ -409,6 +468,34 @@ fn parse_key(input: &str) -> Result<SecretKey> {
     }
     file.read_exact(&mut key[..]).map_err(|e| format!("cannot read key file: {e}"))?;
     Ok(key)
+}
+
+/// Redacts every copy of the key from shell history files, in case it was
+/// ever typed or pasted into a command, and describes the result.
+fn scrub_history(key: &[u8; KEY_LEN]) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let shown = |path: &Path| match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", safe_path(rest)),
+        None => safe_path(path),
+    };
+    let mut redacted = Vec::new();
+    let mut unreadable = Vec::new();
+    for path in wipe::history_files() {
+        match wipe::redact_key(&path, key) {
+            Ok(0) => {}
+            Ok(n) => redacted.push(format!("{n} in {}", shown(&path))),
+            Err(e) => unreadable.push(format!("{} ({e})", shown(&path))),
+        }
+    }
+    let mut status = if redacted.is_empty() {
+        "key not found in shell history".to_string()
+    } else {
+        format!("key redacted ({})", redacted.join(", "))
+    };
+    if !unreadable.is_empty() {
+        status.push_str(&format!("; could not check {}", unreadable.join(", ")));
+    }
+    status
 }
 
 // ---------------------------------------------------------------------------
@@ -471,29 +558,28 @@ fn check_header(bytes: &[u8]) -> Result<()> {
 
 fn verify_encrypted(key: &[u8; KEY_LEN], path: &Path, len: usize, hash: &[u8; 32]) -> Result<()> {
     let plain = open(key, read_file(path)?).map_err(|e| format!("verification failed: {e}"))?;
-    if plain.len() != len || sha256(&plain) != *hash {
+    if plain.len() != len || *sha256(&plain) != *hash {
         return Err("verification failed: decrypted file does not match the original".into());
     }
     Ok(())
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
-    Sha256::digest(data).into()
+fn sha256(data: &[u8]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(Sha256::digest(data).into())
 }
 
-fn sha256_file(path: &Path) -> Result<[u8; 32]> {
-    let err = |e: io::Error| format!("cannot re-read {}: {e}", path.display());
-    let mut file = File::open(path).map_err(err)?;
-    let mut buf = Zeroizing::new(vec![0u8; 1 << 16]);
+fn sha256_file(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    let mut file = open_no_follow(path).map_err(|e| open_error(path, e))?;
+    let mut buf = secret_buffer(1 << 16)?;
     let mut hasher = Sha256::new();
     loop {
-        let n = file.read(&mut buf).map_err(err)?;
+        let n = file.read(&mut buf).map_err(|e| read_error(path, e))?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().into())
+    Ok(Zeroizing::new(hasher.finalize().into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -502,37 +588,61 @@ fn sha256_file(path: &Path) -> Result<[u8; 32]> {
 
 fn regular_file_len(path: &Path) -> Result<u64> {
     let meta =
-        fs::symlink_metadata(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        fs::symlink_metadata(path).map_err(|e| format!("cannot open {}: {e}", safe_path(path)))?;
     if meta.file_type().is_symlink() {
         return Err(format!(
             "{} is a symbolic link; give the path of the file it points to",
-            path.display()
+            safe_path(path)
         ));
     }
     if !meta.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
+        return Err(format!("{} is not a regular file", safe_path(path)));
     }
     Ok(meta.len())
 }
 
-/// Reads a whole file into a buffer that is zeroed when dropped. The buffer is
-/// sized up front so it never reallocates and leaves stray copies behind.
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)
+}
+
+fn open_error(path: &Path, e: io::Error) -> String {
+    if e.raw_os_error() == Some(libc::ELOOP) {
+        format!("{} was replaced by a symbolic link; not touching it", safe_path(path))
+    } else {
+        format!("cannot open {}: {e}", safe_path(path))
+    }
+}
+
+fn read_error(path: &Path, e: io::Error) -> String {
+    format!("cannot read {}: {e}", safe_path(path))
+}
+
+/// A zeroed buffer for plaintext and other secrets: allocated at its final
+/// size so it never reallocates and leaves copies behind, locked in RAM when
+/// the limit allows, and wiped when dropped.
+fn secret_buffer(len: u64) -> Result<Zeroizing<Vec<u8>>> {
+    let len = usize::try_from(len).map_err(|_| "file is too large to load".to_string())?;
+    let buf = Zeroizing::new(vec![0u8; len]);
+    protect::lock(buf.as_ptr(), len);
+    Ok(buf)
+}
+
+/// Reads a whole file, refusing symlinks, into a secret buffer.
 fn read_file(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
-    let err = |e: io::Error| format!("cannot read {}: {e}", path.display());
-    let mut file = File::open(path).map_err(err)?;
-    let len = file.metadata().map_err(err)?.len();
-    let cap = usize::try_from(len).map_err(|_| format!("{} is too large", path.display()))?;
-    let mut buf = Zeroizing::new(Vec::with_capacity(cap));
-    file.read_to_end(&mut buf).map_err(err)?;
+    let mut file = open_no_follow(path).map_err(|e| open_error(path, e))?;
+    let len = file.metadata().map_err(|e| read_error(path, e))?.len();
+    let mut buf = secret_buffer(len)?;
+    file.read_exact(&mut buf).map_err(|e| read_error(path, e))?;
     Ok(buf)
 }
 
 /// Writes `parts` to `path` through a temporary file in the same directory, so
 /// a crash never leaves a half-written file under the final name. New files
-/// are readable by the owner only.
+/// are readable by the owner only. A temporary file that can't be finished is
+/// shredded, not just deleted, since it may hold plaintext.
 fn write_file(path: &Path, parts: &[&[u8]], replace: bool) -> Result<()> {
     if !replace && path.exists() {
-        return Err(format!("{} already exists", path.display()));
+        return Err(format!("{} already exists", safe_path(path)));
     }
     let tmp = with_suffix(path, &format!(".{}.part", std::process::id()));
     let mut file = OpenOptions::new()
@@ -540,41 +650,17 @@ fn write_file(path: &Path, parts: &[&[u8]], replace: bool) -> Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&tmp)
-        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+        .map_err(|e| format!("cannot create {}: {e}", safe_path(&tmp)))?;
     let written = parts
         .iter()
         .try_for_each(|part| file.write_all(part))
         .and_then(|()| file.sync_all())
         .and_then(|()| fs::rename(&tmp, path));
     if let Err(e) = written {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("cannot write {}: {e}", path.display()));
+        let _ = wipe::shred(&tmp);
+        return Err(format!("cannot write {}: {e}", safe_path(path)));
     }
     Ok(())
-}
-
-/// Overwrites the original with zeros, flushes it to disk and deletes it, and
-/// describes the outcome for the report. The overwrite is best effort: SSD
-/// wear levelling and copy-on-write filesystems can keep the old blocks.
-fn shred_and_delete(path: &Path) -> String {
-    let overwritten = overwrite_with_zeros(path).is_ok();
-    match fs::remove_file(path) {
-        Ok(()) if overwritten => "overwritten with zeros, then deleted".into(),
-        Ok(()) => "deleted (could not overwrite it first)".into(),
-        Err(e) => format!("WARNING: could not delete it ({e}); delete it yourself"),
-    }
-}
-
-fn overwrite_with_zeros(path: &Path) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).open(path)?;
-    let zeros = vec![0u8; 1 << 16];
-    let mut remaining = file.metadata()?.len();
-    while remaining > 0 {
-        let n = remaining.min(zeros.len() as u64) as usize;
-        file.write_all(&zeros[..n])?;
-        remaining -= n as u64;
-    }
-    file.sync_all()
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -592,22 +678,8 @@ fn decrypted_path(input: &Path) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Terminal I/O
+// Prompts and output
 // ---------------------------------------------------------------------------
-
-fn ask(prompt: &str) -> Result<String> {
-    print!("{prompt}");
-    io::stdout().flush().map_err(|e| format!("cannot write to terminal: {e}"))?;
-    let mut line = Zeroizing::new(String::new());
-    let n = io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| format!("cannot read input: {e}"))?;
-    if n == 0 {
-        return Err("input ended unexpectedly".into());
-    }
-    Ok(line.trim().to_owned())
-}
 
 fn confirm(question: &str) -> Result<bool> {
     Ok(choose(question, &["yes", "no"])? == "yes")
@@ -619,7 +691,7 @@ fn choose<'a>(question: &str, options: &[&'a str]) -> Result<&'a str> {
     let letters: Vec<&str> = options.iter().map(|option| &option[..1]).collect();
     let prompt = format!("{question} [{}]: ", letters.join("/"));
     loop {
-        let answer = ask(&prompt)?.to_ascii_lowercase();
+        let answer = term::read_line(&prompt)?.to_ascii_lowercase();
         let chosen = options
             .iter()
             .copied()
@@ -631,23 +703,11 @@ fn choose<'a>(question: &str, options: &[&'a str]) -> Result<&'a str> {
     }
 }
 
-/// Reads a line without echoing it when attached to a terminal. Piped input is
-/// read as-is so the tool can be scripted.
-fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
-    let line = if io::stdin().is_terminal() {
-        rpassword::prompt_password(prompt).map_err(|e| format!("cannot read key: {e}"))?
-    } else {
-        ask(prompt)?
-    };
-    let line = Zeroizing::new(line);
-    Ok(Zeroizing::new(line.trim().to_owned()))
-}
-
 fn file_path(arg: Option<&str>, prompt: &str) -> Result<PathBuf> {
     match arg {
         Some(arg) => Ok(PathBuf::from(arg)),
         None => {
-            let raw = ask(prompt)?;
+            let raw = term::read_line(prompt)?;
             if raw.is_empty() {
                 return Err("no file given".into());
             }

@@ -23,18 +23,36 @@ See [Install](#install) for details, including permission errors.
 - **Random or your own keys.** Generate a 256-bit key from the operating
   system's secure random generator, or supply one as 64 hex characters or a
   32-byte key file.
-- **Generated keys are never shown unless you ask.** Choose to print the key
-  once, or have it saved as a binary key file readable only by you.
+- **Generated keys are never shown unless you ask.** Save the key as a
+  binary file readable only by you, print it once, or both.
+- **Printed keys leave no trace.** A printed key appears on the terminal's
+  alternate screen, which keeps no scrollback, and is erased when you press
+  Enter. It is written straight to the terminal, never to standard output, so
+  redirecting the output to a file can't capture it.
 - **Verified before anything is deleted.** After encrypting, the new file is
   read back from disk and decrypted, and its SHA-256 is compared with the
   original. The original is deleted only if they match.
 - **Original overwritten, then deleted.** The plaintext file is overwritten
-  with zeros and flushed to disk before it is removed.
-- **Keys wiped from memory.** Key material and cipher state are zeroized as
-  soon as they are no longer needed.
+  with zeros and flushed to disk, renamed to random characters so its name
+  doesn't linger either, then removed. It is opened once and handled through
+  that one handle, so swapping it for a symlink part way through can't
+  redirect the overwrite to another file.
+- **Nothing left in memory.** Keys, plaintext and typed input are kept in RAM
+  (never swapped out) and zeroed as soon as they're no longer needed. Core
+  dumps are disabled, and on Linux other programs running as you can't read
+  the tool's memory.
+- **Nothing left on disk.** Unused key files, partial output and output that
+  fails verification are overwritten with zeros before they're deleted. The
+  tool writes no logs.
+- **Keys scrubbed from shell history.** Whenever a key is used, any copy of it
+  in your bash, zsh or fish history files is overwritten with asterisks, in
+  case it was ever typed or pasted into a command.
 - **Hidden key entry.** Keys typed at the prompt are not echoed. When
   encrypting, a typed key must be entered twice so a typo can't lock the file
   for good.
+- **Safe to interrupt.** Ctrl-C at any point stops cleanly: keys are wiped,
+  unused key files and partial output are shredded, and the original is left
+  untouched unless encryption had already been verified.
 - **Crash-safe writes.** Output goes to a temporary file that is renamed into
   place, so a half-written file never appears under the final name.
 
@@ -153,9 +171,9 @@ Encrypt using AES-256-GCM? [y/n]: y
   Output         report.pdf.enc  1258324 bytes (1.2 MiB)
   Overhead       33 bytes (17 header + 16 tag)
   Integrity      verified: re-read from disk, decrypted, SHA-256 matches original
-  Original       overwritten with zeros, then deleted
-  Key in memory  wiped (zeroized)
-  Time           11.81ms
+  Original       overwritten with zeros, name scrambled, then deleted
+  Key and data   kept in RAM (never swapped), wiped after use
+  Time           15.75ms
 ----------------------------------------------------------------
 ```
 
@@ -166,8 +184,12 @@ The prompts go in this order:
 2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
    `<file>.key` in the **current directory**, readable only by you (a number
    is added if the name is taken).
-3. **Print the key?** `y` shows it once as 64 hex characters. You can answer
-   `y` to both questions to keep two copies.
+3. **Print the key?** `y` shows it once as 64 hex characters on the
+   terminal's alternate screen; press Enter when you've copied it and it's
+   erased. Printing needs an interactive terminal and is refused when there
+   isn't one, or when the session is being recorded (asciinema) or run inside
+   GNU screen, which may keep it in scrollback. You can answer `y` to both
+   questions to keep two copies.
 
    If you answer `n` to both, you're warned that the key would be lost (and
    the file with it) and asked `Print or save the key? [p/s]` until you
@@ -193,8 +215,9 @@ Decrypt using AES-256-GCM? [y/n]: y
   Input          report.pdf.enc  1258324 bytes (1.2 MiB) (kept)
   Output         report.pdf  1258291 bytes (1.2 MiB)
   Integrity      verified: re-read from disk, SHA-256 matches decrypted data
-  Key in memory  wiped (zeroized)
-  Time           11.74ms
+  Key and data   kept in RAM (never swapped), wiped after use
+  Shell history  key not found in shell history
+  Time           10.90ms
 ----------------------------------------------------------------
 ```
 
@@ -217,11 +240,17 @@ error: authentication failed: wrong key, or the file is corrupted or has been ta
 
 When standard input isn't a terminal, answers and keys are read line by line
 from it. The key is then read as plain text, so use this only where that's
-acceptable:
+acceptable. Prefer passing the path to a key file, as here:
 
 ```
 printf 'report.pdf.key\ny\n' | decrypt report.pdf.enc
 ```
+
+Typing a hex key into a command like this puts it in your shell's history.
+The tool overwrites it in your history files the next time that key is used,
+but it can't reach the copy the running shell holds in memory, which is saved
+when the shell exits. If you've done this, run `history -c` in that shell.
+Printing a key isn't possible without an interactive terminal.
 
 ## File format
 
@@ -251,10 +280,17 @@ plaintext = AESGCM(key).decrypt(blob[5:17], blob[17:], blob[:17])
 - **Lose the key, lose the file.** There's no recovery or backdoor. Keep key
   files somewhere other than next to the encrypted file.
 - **Overwriting isn't guaranteed to erase.** SSD wear levelling, copy-on-write
-  filesystems (btrfs, ZFS) and backups can keep old copies of the original.
-  Full-disk encryption is the reliable protection for those.
-- **Memory wiping is best effort.** Keys and plaintext buffers are zeroized,
-  but no program can rule out copies left in swap or by the OS.
+  filesystems (btrfs, ZFS) and backups can keep old copies of the original,
+  and of history lines and files the tool overwrites. Full-disk encryption is
+  the reliable protection for those.
+- **Large files can reach swap.** Keys are always locked in RAM, but the
+  system's memory-lock limit (often 8 MiB) caps how much plaintext can be.
+  The report says which applied. Encrypted swap, or no swap, covers the rest.
+- **Outside recorders can't be wiped.** Terminal recording or logging set up
+  outside the tool (`script`, terminal emulator session logs, tmux
+  `pipe-pane`) captures a printed key as it's displayed, and the tool can't
+  know where those logs are. Save the key instead of printing it when a
+  session might be recorded.
 - **Whole files are processed in memory.** You need free RAM at least the size
   of the file. AES-GCM limits a single file to 64 GiB.
 - **Keys are raw 256-bit values, not passwords.** There's no password-based
@@ -272,14 +308,19 @@ cargo test --release
 ```
 
 The tests cover round trips at several sizes, wrong-key rejection, detection
-of a change to any single byte, truncation, nonce uniqueness, and key parsing.
+of a change to any single byte, truncation, nonce uniqueness, key parsing,
+overwriting and deleting files (including when a file is swapped for a
+symlink part way through), history redaction, and escaping of untrusted file
+names.
 
-All the code is in `src/main.rs`. It uses the RustCrypto
-[`aes-gcm`](https://crates.io/crates/aes-gcm) and
+The code is in `src/`: `main.rs` has the commands and crypto, `protect.rs`
+the process hardening and memory locking, `term.rs` the terminal input and
+output, and `wipe.rs` secure deletion and history redaction. It uses the
+RustCrypto [`aes-gcm`](https://crates.io/crates/aes-gcm) and
 [`sha2`](https://crates.io/crates/sha2) crates,
 [`zeroize`](https://crates.io/crates/zeroize) for wiping secrets,
 [`getrandom`](https://crates.io/crates/getrandom) for randomness and
-[`rpassword`](https://crates.io/crates/rpassword) for hidden input.
+[`libc`](https://crates.io/crates/libc) for the system calls.
 
 ## Releasing
 
