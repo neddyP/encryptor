@@ -134,10 +134,11 @@ prints the usage.
 $ encrypt report.pdf
 Generate a random 256-bit key? [y/n]: y
 Key generated (not displayed).
-Print the key? [y/n]: n
+Save symmetric encryption key as a file in your current directory? [y/n]: y
 Key saved as: report.pdf.key
 Keep this file safe: anyone who has it can decrypt the file, and
-without it the file cannot be decrypted.
+without the key the file cannot be decrypted.
+Print the key? [y/n]: n
 Encrypt using AES-256-GCM? [y/n]: y
 
 ----------------------------------------------------------------
@@ -160,12 +161,19 @@ Encrypt using AES-256-GCM? [y/n]: y
 
 The prompts go in this order:
 
-1. **Generate a random key?** Answer `n` to enter your own key instead.
-2. **Print the key?** `y` shows it once as 64 hex characters. `n` saves it as
-   a 32-byte binary file named `<file>.key` in the **current directory** (a
-   number is added if the name is taken).
-3. **Encrypt?** `n` cancels. A key file saved in step 2 is then removed,
-   since it never encrypted anything.
+1. **Generate a random key?** Answer `n` to enter your own key instead; the
+   save and print questions are then skipped.
+2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
+   `<file>.key` in the **current directory**, readable only by you (a number
+   is added if the name is taken).
+3. **Print the key?** `y` shows it once as 64 hex characters. You can answer
+   `y` to both questions to keep two copies.
+
+   If you answer `n` to both, you're warned that the key would be lost (and
+   the file with it) and asked `Print or save the key? [p/s]` until you
+   choose one.
+4. **Encrypt?** `n` cancels. A key file saved earlier is then removed, since
+   it never encrypted anything.
 
 If `FILE.enc` already exists, the tool refuses to run rather than overwrite it.
 
