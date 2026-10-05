@@ -1,7 +1,7 @@
 //! The home screen `encryptor` shows when run on its own in a terminal: the
 //! name in large letters, the version, the help, and keys to encrypt or
-//! decrypt a file. It is drawn on the alternate screen, like `less`, so the
-//! terminal is left as it was.
+//! decrypt a file. It's printed like any other output, so it stays in the
+//! terminal's scrollback along with everything before it.
 
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
@@ -21,13 +21,27 @@ const ART: [&str; 7] = [
     r" '--------'                         |___/|_|",
 ];
 
-const KEYS: &str = " e encrypt a file   d decrypt a file   q quit";
+const KEYS: &str = " e encrypt a file   d decrypt a file   q quit ";
+
+/// Left margin for everything above the keys.
+const MARGIN: &str = "  ";
 
 /// What was chosen on the home screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Choice {
     Encrypt,
     Decrypt,
     Quit,
+}
+
+impl Choice {
+    fn word(self) -> &'static str {
+        match self {
+            Choice::Encrypt => "encrypt",
+            Choice::Decrypt => "decrypt",
+            Choice::Quit => "quit",
+        }
+    }
 }
 
 /// Whether the home screen can be shown: typing comes from a terminal, and
@@ -37,94 +51,48 @@ pub fn available() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal() && !term.is_empty() && term != "dumb"
 }
 
-/// Shows the home screen until a key chooses what to do.
+/// Prints the home screen, then waits for a key that chooses what to do.
 pub fn show(usage: &str, version: &str) -> Result<Choice> {
     let color = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
-    let lines = content(usage, version);
-    let _raw = RawMode::enter(libc::STDIN_FILENO)?;
-    let _screen = Screen::enter()?;
-
-    let mut top = 0;
-    let mut shown = None;
-    loop {
-        protect::check()?;
-        // Redrawn when scrolled, and when the window changes size.
-        let (rows, cols) = terminal_size();
-        if shown != Some((top, rows, cols)) {
-            write(&frame(&lines, top, rows, cols, color))?;
-            shown = Some((top, rows, cols));
+    write(&render(usage, version, terminal_columns(), color))?;
+    let choice = {
+        let _raw = RawMode::enter(libc::STDIN_FILENO)?;
+        loop {
+            protect::check()?;
+            match read_key(&mut next_byte)? {
+                Some(Key::Encrypt) => break Choice::Encrypt,
+                Some(Key::Decrypt) => break Choice::Decrypt,
+                Some(Key::Quit) => break Choice::Quit,
+                Some(Key::Other) | None => {}
+            }
         }
-        let Some(key) = read_key(&mut next_byte)? else { continue };
-        let body = body_rows(rows);
-        top = match key {
-            Key::Encrypt => return Ok(Choice::Encrypt),
-            Key::Decrypt => return Ok(Choice::Decrypt),
-            Key::Quit => return Ok(Choice::Quit),
-            Key::Up => top.saturating_sub(1),
-            Key::Down => top + 1,
-            Key::PageUp => top.saturating_sub(body),
-            Key::PageDown => top + body,
-            Key::Home => 0,
-            Key::End => lines.len(),
-            Key::Other => top,
-        }
-        .min(lines.len().saturating_sub(body));
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Style {
-    Art,
-    Title,
-    Plain,
-}
-
-struct Line {
-    text: String,
-    style: Style,
-}
-
-/// Everything on the home screen, top to bottom, with a margin on the left.
-fn content(usage: &str, version: &str) -> Vec<Line> {
-    let line = |text: &str, style| Line { text: format!("  {text}"), style };
-    let mut lines: Vec<Line> = ART.iter().map(|art| line(art, Style::Art)).collect();
-    lines.push(line("", Style::Plain));
-    lines.push(line(version, Style::Title));
-    lines.push(line("", Style::Plain));
-    lines.extend(usage.lines().map(|text| line(text, Style::Plain)));
-    lines
-}
-
-/// Rows for the content, above the key bar.
-fn body_rows(rows: usize) -> usize {
-    rows.saturating_sub(1).max(1)
-}
-
-/// The whole screen as one write: the content from line `top`, cut to the
-/// width, then the key bar on the last row, with where the view is when not
-/// everything fits.
-fn frame(lines: &[Line], top: usize, rows: usize, cols: usize, color: bool) -> String {
-    let body = body_rows(rows);
-    let mut out = String::from("\x1b[H");
-    for line in lines.iter().skip(top).take(body) {
-        let text: String = line.text.chars().take(cols).collect();
-        match line.style {
-            Style::Art if color => out.push_str(&format!("\x1b[1;36m{text}\x1b[0m")),
-            Style::Art | Style::Title => out.push_str(&format!("\x1b[1m{text}\x1b[0m")),
-            Style::Plain => out.push_str(&text),
-        }
-        out.push_str("\x1b[K\r\n");
-    }
-    for _ in lines.len().saturating_sub(top).min(body)..body {
-        out.push_str("\x1b[K\r\n");
-    }
-    let position = match lines.len() > body {
-        true => format!("arrows scroll  {}-{} of {} ", top + 1, (top + body).min(lines.len()), lines.len()),
-        false => String::new(),
     };
-    let gap = cols.saturating_sub(KEYS.len() + position.len());
-    let bar: String = format!("{KEYS}{}{position}", " ".repeat(gap)).chars().take(cols).collect();
-    out.push_str(&format!("\x1b[7m{bar}\x1b[0m\x1b[K"));
+    // What was chosen goes after the keys, so the scrollback shows it.
+    write(&format!("{}\n", choice.word()))?;
+    Ok(choice)
+}
+
+/// The home screen as printed: the art when the terminal is wide enough for
+/// it, the version, the help, and the keys, which are left without a line
+/// break for the choice to follow.
+fn render(usage: &str, version: &str, cols: usize, color: bool) -> String {
+    let mut out = String::from("\n");
+    let art_width = MARGIN.len() + ART.iter().map(|line| line.len()).max().unwrap_or(0);
+    if cols >= art_width {
+        let style = if color { "\x1b[1;36m" } else { "\x1b[1m" };
+        for line in ART {
+            out.push_str(&format!("{MARGIN}{style}{line}\x1b[0m\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("{MARGIN}\x1b[1m{version}\x1b[0m\n\n"));
+    for line in usage.lines() {
+        match line.is_empty() {
+            true => out.push('\n'),
+            false => out.push_str(&format!("{MARGIN}{line}\n")),
+        }
+    }
+    out.push_str(&format!("\n\x1b[7m{KEYS}\x1b[0m "));
     out
 }
 
@@ -133,18 +101,12 @@ enum Key {
     Encrypt,
     Decrypt,
     Quit,
-    Up,
-    Down,
-    PageUp,
-    PageDown,
-    Home,
-    End,
     Other,
 }
 
 /// Decodes one key from the bytes `next` gives, waiting up to the time it's
-/// given for each. `None` if nothing was pressed in time, so the screen can
-/// check whether the window was resized.
+/// given for each. `None` if nothing was pressed in time, so an interrupt can
+/// be noticed.
 fn read_key(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Option<Key>> {
     let Some(byte) = next(Duration::from_millis(250))? else { return Ok(None) };
     Ok(Some(match byte {
@@ -152,19 +114,14 @@ fn read_key(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Opt
         b'd' | b'D' => Key::Decrypt,
         // q, Ctrl-C and Ctrl-D.
         b'q' | b'Q' | 0x03 | 0x04 => Key::Quit,
-        b'k' => Key::Up,
-        b'j' => Key::Down,
-        b'b' => Key::PageUp,
-        b' ' => Key::PageDown,
-        b'g' => Key::Home,
-        b'G' => Key::End,
         0x1b => escape_sequence(next)?,
         _ => Key::Other,
     }))
 }
 
-/// The rest of a key that starts with Escape. Arrows and paging keys send a
-/// sequence straight away; Escape on its own, with nothing after it, quits.
+/// The rest of a key that starts with Escape. Keys like the arrows send a
+/// sequence straight away, which is read to its end and ignored; Escape on its
+/// own, with nothing after it, quits.
 fn escape_sequence(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Key> {
     let soon = Duration::from_millis(50);
     match next(soon)? {
@@ -172,30 +129,13 @@ fn escape_sequence(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Res
         Some(b'[' | b'O') => {}
         Some(_) => return Ok(Key::Other),
     }
-    let mut number = 0u32;
-    loop {
-        return Ok(match next(soon)? {
-            Some(digit @ b'0'..=b'9') => {
-                number = number.saturating_mul(10).saturating_add(u32::from(digit - b'0'));
-                continue;
-            }
-            Some(b'A') => Key::Up,
-            Some(b'B') => Key::Down,
-            Some(b'H') => Key::Home,
-            Some(b'F') => Key::End,
-            Some(b'~') => match number {
-                5 => Key::PageUp,
-                6 => Key::PageDown,
-                1 | 7 => Key::Home,
-                4 | 8 => Key::End,
-                _ => Key::Other,
-            },
-            // The end of a sequence this screen has no use for.
-            Some(0x40..=0x7e) | None => Key::Other,
-            // Separators and modifiers, as in Ctrl+Up.
-            Some(_) => continue,
-        });
+    // Parameters and separators, up to the final byte, as in Ctrl+Up.
+    while let Some(byte) = next(soon)? {
+        if (0x40..=0x7e).contains(&byte) {
+            break;
+        }
     }
+    Ok(Key::Other)
 }
 
 /// The next byte typed, waiting at most `wait`. End of input reads as Ctrl-D.
@@ -224,15 +164,15 @@ fn next_byte(wait: Duration) -> Result<Option<u8>> {
     }
 }
 
-/// Rows and columns of the terminal, or the classic 24 by 80 if unknown.
-fn terminal_size() -> (usize, usize) {
+/// Columns of the terminal, or the classic 80 if unknown.
+fn terminal_columns() -> usize {
     // SAFETY: winsize is plain data, filled in by the ioctl.
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: asks the terminal on standard output for its size.
     let known = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
-    match known && size.ws_row > 0 && size.ws_col > 0 {
-        true => (usize::from(size.ws_row), usize::from(size.ws_col)),
-        false => (24, 80),
+    match known && size.ws_col > 0 {
+        true => usize::from(size.ws_col),
+        false => 80,
     }
 }
 
@@ -243,31 +183,15 @@ fn write(text: &str) -> Result<()> {
         .map_err(|e| Error::from(format!("cannot write to terminal: {e}")))
 }
 
-/// The alternate screen with the cursor hidden, until dropped, even on an
-/// error or Ctrl-C.
-struct Screen;
-
-impl Screen {
-    fn enter() -> Result<Self> {
-        write("\x1b[?1049h\x1b[?25l\x1b[2J")?;
-        Ok(Self)
-    }
-}
-
-impl Drop for Screen {
-    fn drop(&mut self) {
-        let _ = write("\x1b[2J\x1b[?25h\x1b[?1049l");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// What a frame shows, without the escape sequences that style it.
-    fn visible(frame: &str) -> Vec<String> {
+    /// What the home screen shows, line by line, without the escape sequences
+    /// that style it.
+    fn visible(text: &str) -> Vec<String> {
         let mut plain = String::new();
-        let mut chars = frame.chars();
+        let mut chars = text.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
                 for c in chars.by_ref() {
@@ -275,7 +199,7 @@ mod tests {
                         break;
                     }
                 }
-            } else if c != '\r' {
+            } else {
                 plain.push(c);
             }
         }
@@ -289,52 +213,61 @@ mod tests {
 
     #[test]
     fn fits_an_80_column_terminal() {
-        for line in content("", "encryptor 9.9.9") {
-            assert!(line.text.len() <= 80, "{:?} is {} wide", line.text, line.text.len());
-            assert!(line.text.is_ascii());
+        let text = render(crate::USAGE, "encryptor 9.9.9, writing file format 9", 80, true);
+        for line in visible(&text) {
+            assert!(line.chars().count() <= 80, "{line:?} is {} wide", line.chars().count());
+            assert!(line.is_ascii());
         }
     }
 
     #[test]
     fn shows_the_art_version_help_and_keys() {
-        let lines = content("USAGE:\n    encrypt FILE", "encryptor 9.9.9");
-        let screen = visible(&frame(&lines, 0, 30, 80, true));
-        assert_eq!(screen.len(), 30, "one row for each line of the terminal");
-        assert!(screen[2].contains("___ _ __   ___"), "{:?}", screen[2]);
-        assert!(screen.iter().any(|row| row.trim() == "encryptor 9.9.9"));
-        assert!(screen.iter().any(|row| row.trim() == "encrypt FILE"));
-        assert!(screen[29].starts_with(" e encrypt a file   d decrypt a file   q quit"));
-        assert!(!screen[29].contains("of"), "everything fits, so no position");
+        let text = render("USAGE:\n    encrypt FILE", "encryptor 9.9.9", 80, true);
+        let lines = visible(&text);
+        assert!(lines.iter().any(|line| line.contains("___ _ __   ___")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.trim() == "encryptor 9.9.9"));
+        assert!(lines.iter().any(|line| line.trim() == "encrypt FILE"));
+        let last = lines.last().expect("a last line");
+        assert_eq!(last.trim(), KEYS.trim(), "the keys come last, for the choice to follow");
+        assert!(!text.ends_with('\n'));
     }
 
     #[test]
-    fn scrolls_and_cuts_to_a_small_terminal() {
-        let usage: String = (1..=40).map(|n| format!("line {n}\n")).collect();
-        let lines = content(&usage, "v");
-        let screen = visible(&frame(&lines, 10, 12, 30, false));
-        assert_eq!(screen.len(), 12);
-        assert!(screen.iter().all(|row| row.chars().count() <= 30), "{screen:?}");
-        assert_eq!(screen[0].trim(), "line 1");
-        assert!(screen[11].starts_with(" e encrypt a file"), "{:?}", screen[11]);
-        assert!(visible(&frame(&lines, 10, 12, 80, false))[11].ends_with(&format!("11-21 of {} ", lines.len())));
+    fn prints_in_place_without_taking_over_the_screen() {
+        let text = render("USAGE:\n    encrypt FILE", "encryptor 9.9.9", 80, true);
+        for sequence in ["\x1b[?1049h", "\x1b[?47h", "\x1b[2J", "\x1b[3J", "\x1b[H", "\x1b[?25l"] {
+            assert!(!text.contains(sequence), "{sequence:?} would move to or clear a screen");
+        }
     }
 
     #[test]
-    fn reads_keys_and_their_escape_sequences() {
+    fn leaves_out_the_art_when_too_narrow_for_it() {
+        let lines = visible(&render("USAGE:\n    encrypt FILE", "encryptor 9.9.9", 40, false));
+        assert!(!lines.iter().any(|line| line.contains("___")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.trim() == "encryptor 9.9.9"));
+    }
+
+    #[test]
+    fn reads_keys_and_skips_escape_sequences() {
         assert_eq!(keys(b"e"), Some(Key::Encrypt));
         assert_eq!(keys(b"D"), Some(Key::Decrypt));
         assert_eq!(keys(b"q"), Some(Key::Quit));
         assert_eq!(keys(&[0x03]), Some(Key::Quit));
-        assert_eq!(keys(b"\x1b[A"), Some(Key::Up));
-        assert_eq!(keys(b"\x1bOB"), Some(Key::Down));
-        assert_eq!(keys(b"\x1b[5~"), Some(Key::PageUp));
-        assert_eq!(keys(b"\x1b[6~"), Some(Key::PageDown));
-        assert_eq!(keys(b"\x1b[1;5A"), Some(Key::Up));
-        assert_eq!(keys(b"\x1b[H"), Some(Key::Home));
-        assert_eq!(keys(b"\x1b[4~"), Some(Key::End));
+        assert_eq!(keys(&[0x04]), Some(Key::Quit));
         assert_eq!(keys(b"\x1b"), Some(Key::Quit), "Escape on its own");
-        assert_eq!(keys(b"\x1b[Z"), Some(Key::Other));
+        assert_eq!(keys(b"\x1b[A"), Some(Key::Other), "an arrow");
+        assert_eq!(keys(b"\x1bOB"), Some(Key::Other));
+        assert_eq!(keys(b"\x1b[1;5A"), Some(Key::Other), "Ctrl+Up");
+        assert_eq!(keys(b"\x1b[5~"), Some(Key::Other), "Page Up");
         assert_eq!(keys(b"x"), Some(Key::Other));
         assert_eq!(keys(b""), None, "nothing pressed yet");
+    }
+
+    #[test]
+    fn an_escape_sequence_is_read_to_its_end() {
+        let mut bytes = b"\x1b[1;5Ae".iter().copied();
+        let mut next = |_| Ok(bytes.next());
+        assert_eq!(read_key(&mut next).ok().flatten(), Some(Key::Other));
+        assert_eq!(read_key(&mut next).ok().flatten(), Some(Key::Encrypt), "the e after Ctrl+Up");
     }
 }

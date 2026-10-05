@@ -1,5 +1,5 @@
 //! The report printed when a command succeeds, which can be saved as a text
-//! file, and after which the terminal is wiped.
+//! file.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -8,19 +8,17 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::explain::{self, Action};
-use crate::term::{self, confirm, safe};
+use crate::term::{confirm, safe};
 
 /// Prints the report. With `ask`, it then offers to save it in the current
-/// folder as `<summary>.txt`, and waits for Enter to wipe the terminal,
-/// scrollback and all, so nothing the run showed stays on screen.
+/// folder as `<summary>.txt`.
 pub fn show(title: &str, rows: &[(&str, String)], summary: &str, ask: bool) -> Result<()> {
     let text = text(title, rows);
     print!("\n{text}");
     io::stdout().flush().map_err(|e| format!("cannot write the report: {e}"))?;
     if ask {
-        // Stopping at either question just skips to the wipe: the work is done.
-        let _ = offer_to_save(&text, summary).and_then(|()| term::wait_to_wipe());
-        term::wipe_screen();
+        // Stopping at the question is fine: the work is done.
+        let _ = offer_to_save(&text, summary);
     }
     Ok(())
 }
@@ -37,8 +35,8 @@ fn text(title: &str, rows: &[(&str, String)]) -> String {
 }
 
 /// Asks whether to save the report, and saves it under the first free name,
-/// readable only by its owner. A failure to save is said, not returned, so
-/// the terminal is still wiped.
+/// readable only by its owner. A failure to save is said, not returned, since
+/// the encrypting or decrypting it reports on has succeeded.
 fn offer_to_save(text: &str, summary: &str) -> Result<()> {
     let name = (1..=1000)
         .map(|n| if n == 1 { format!("{summary}.txt") } else { format!("{summary}.{n}.txt") })
