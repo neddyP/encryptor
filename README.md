@@ -71,6 +71,9 @@ See [Install](#install) for details, including permission errors.
   removed with the entries holding it, in case it was ever typed or pasted
   into a command. The files are rewritten in place, and the bytes left over
   are zeroed before they're cut short.
+- **Terminal wiped when you're done.** After the report, you're offered to
+  save it as a text file, then pressing Enter wipes the terminal: the screen
+  and its scrollback, and in tmux, the pane's history.
 - **Warned about disks that keep old copies.** On a copy-on-write filesystem
   (APFS, btrfs, ZFS and the like) overwriting can't reach a file's old
   contents, so you're told and asked before encrypting.
@@ -206,11 +209,10 @@ advance, so it isn't asked:
 | `-h`, `--help`        | Show the usage                                                      |
 | `-V`, `--version`     | Show the version and the file formats it reads                      |
 
-Run on its own in a terminal, `encryptor` prints a home screen: its name in
-large letters, the version and this help. It's printed like any other output,
-so it stays in your terminal's scrollback with everything before it. Press `e`
-to encrypt a file, `d` to decrypt one, or `q` to quit. Without a terminal it
-asks "Encrypt or decrypt?" instead.
+Run on its own in a terminal, `encryptor` shows a home screen: its name in
+large letters, the version and this help. Press `e` to encrypt a file, `d` to
+decrypt one, or `q` to quit; the arrow keys scroll if it doesn't all fit.
+Without a terminal it asks "Encrypt or decrypt?" instead.
 
 If you leave out `FILE`, you're asked for it. Typed paths may be quoted or
 start with `~/`, so you can drag a file into the terminal.
@@ -269,6 +271,8 @@ Encrypt using AES-256-GCM? [y/n]: y
   Time           15.75ms
 ----------------------------------------------------------------
 Save this summary as report.pdf.encryption-summary.txt in the current folder? [y/n]: n
+
+Press Enter to wipe the terminal:
 ```
 
 The prompts go in this order:
@@ -300,11 +304,14 @@ The prompts go in this order:
    it never encrypted anything.
 5. **Save this summary?** `y` saves the report as
    `<file>.encryption-summary.txt` in the current directory, readable only
-   by you (a number is added if the name is taken). It's only asked at a
-   terminal, and not with `--yes` or `--quiet`, so scripts never wait for it.
+   by you (a number is added if the name is taken).
+6. **Press Enter to wipe the terminal.** Everything in the terminal is
+   cleared, scrollback included, along with the pane's history in tmux.
+   If something recorded the session, it's named first, since its copy
+   can't be wiped. Ctrl-C wipes too.
 
-The report stays in the terminal's scrollback, like everything else, until
-you clear it.
+The last two are only asked at a terminal, and not with `--yes` or
+`--quiet`, so scripts never wait for them.
 
 If `FILE.enc` already exists, the tool refuses to run rather than overwrite it.
 
@@ -372,7 +379,7 @@ Decrypt using AES-256-GCM? [y/n]: y
 At the key prompt, either type or paste the hex key, or give the path to the
 key file (for example `report.pdf.key`). Neither is echoed. You get three
 attempts. As after encrypting, you're then offered to save the summary, as
-`<file>.decryption-summary.txt`.
+`<file>.decryption-summary.txt`, and Enter wipes the terminal.
 
 The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
@@ -572,9 +579,6 @@ starts with the metadata, as above; version 1's is just the contents.
     attachments, cloud sync and backups, desktop search indexes (GNOME's
     LocalSearch, KDE's Baloo), other programs' own lists of recent files,
     and on macOS, Quick Look's thumbnails and Spotlight.
-  - **The terminal's scrollback.** File names and the report stay in it
-    until you clear it (`clear`, or Cmd-K in macOS's Terminal). Printed keys
-    don't: they're shown on a separate screen that keeps no scrollback.
   - **Terminal records.** Session recorders, terminal emulator logs and GNU
     screen's scrollback keep their own copy of what was shown, as do sudo
     I/O logs and process accounting where a system administrator has turned
@@ -638,7 +642,7 @@ The code is in `src/`:
 | `explain.rs`   | Error messages and their fixes                                       |
 | `error.rs`     | The error type                                                       |
 | `protect.rs`   | Process hardening, memory locking and zeroing, interrupts            |
-| `report.rs`    | The report printed on success, and saving it                         |
+| `report.rs`    | The report printed on success, saving it, and wiping the terminal    |
 
 It uses the RustCrypto
 [`aes-gcm`](https://crates.io/crates/aes-gcm),
