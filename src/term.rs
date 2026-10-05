@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
-use crate::{protect, recording};
+use crate::{protect, session};
 
 /// Longest line accepted at a prompt. Line buffers are allocated at this size
 /// up front because growing them would leave copies of the input behind.
@@ -79,9 +79,11 @@ pub enum Shown {
 
 /// Shows `key`, hex-encoded, on the terminal's alternate screen (the one full
 /// screen programs like `less` use), which keeps no scrollback. Waits for
-/// Enter, then erases it and returns to the normal screen. Everything is
-/// written straight to the terminal device, so the key never goes through
-/// standard output and can't end up in a redirected file.
+/// Enter, then erases it and returns to the normal screen. In a session, the
+/// run is on the alternate screen already: the key takes it over, and once
+/// erased, the session's art and what was done so far are drawn again.
+/// Everything is written straight to the terminal device, so the key never
+/// goes through standard output and can't end up in a redirected file.
 pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
     let term = std::env::var("TERM").unwrap_or_default();
     if term.is_empty() || term == "dumb" {
@@ -95,64 +97,56 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
     protect::lock(hex.as_ptr(), hex.len());
     hex::encode_to_slice(key, &mut hex[..]).expect("a 32-byte key is 64 hex characters");
 
+    let in_session = session::active();
+    let (open, close): (&[u8], &[u8]) = match in_session {
+        true => (b"\x1b[H\x1b[2J", b"\x1b[H\x1b[2J"),
+        false => (b"\x1b[?1049h\x1b[2J\x1b[H", b"\x1b[2J\x1b[H\x1b[?1049l"),
+    };
     let fd = tty.as_raw_fd();
+    let _ = io::stdout().flush();
     let raw = RawMode::enter(fd)?;
     let shown = tty
-        .write_all(b"\x1b[?1049h\x1b[2J\x1b[H")
+        .write_all(open)
         .and_then(|()| tty.write_all(b"Your encryption key (shown once):\r\n\r\n    "))
         .and_then(|()| tty.write_all(&hex[..]))
         .and_then(|()| {
             tty.write_all(
                 b"\r\n\r\nWrite it down or put it in a password manager. Without it the file\r\n\
-                  cannot be decrypted.\r\n\r\nPress Enter to erase it from the screen.",
+                  cannot be decrypted.\r\n\r\n",
             )
         })
+        // The prompt on the bottom row, when there's room below the key.
+        .and_then(|()| match rows(fd) {
+            Some(rows) if rows > 9 => tty.write_all(format!("\x1b[{rows};1H").as_bytes()),
+            _ => Ok(()),
+        })
+        .and_then(|()| tty.write_all(b"Press Enter to erase the key and go back."))
         .map_err(|e| Error::from(format!("cannot write to terminal: {e}")));
     let result = shown.and_then(|()| wait_for_enter(fd));
-    // Erase and leave the alternate screen even after an error or Ctrl-C.
-    let _ = tty.write_all(b"\x1b[2J\x1b[3J\x1b[H\x1b[?1049l");
+    // Erase it even after an error or Ctrl-C. Only the screen: erasing
+    // scrollback as well (ESC [3J) could reach the window's own history.
+    let _ = tty.write_all(close);
     drop(raw);
+    if in_session {
+        session::header();
+    }
     result.map(|()| Shown::Yes)
 }
 
-/// Waits for Enter before the terminal is wiped, first naming anything that
-/// recorded the session, since wiping the terminal can't remove its copy.
-pub fn wait_to_wipe() -> Result<()> {
-    let recorders = recording::scan();
-    if !recorders.is_empty() {
-        eprintln!();
-        eprintln!("note: wiping the terminal won't remove what these have recorded:");
-        for recorder in &recorders {
-            eprint!("{recorder}");
-        }
-    }
-    eprint!("\nPress Enter to wipe the terminal: ");
-    let _raw = RawMode::enter(libc::STDIN_FILENO)?;
-    wait_for_enter(libc::STDIN_FILENO)
+/// Rows of the terminal on `fd`, if it says.
+fn rows(fd: libc::c_int) -> Option<u16> {
+    // SAFETY: winsize is plain data, filled in by the ioctl.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: asks the terminal on `fd` for its size.
+    let known = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0;
+    (known && size.ws_row > 0).then_some(size.ws_row)
 }
 
-/// Clears the terminal and its scrollback: everything shown in it, by this
-/// program and before. Inside tmux, its own history of the pane is cleared
-/// as well, since the terminal only holds what tmux shows of it.
-pub fn wipe_screen() {
-    let clear = b"\x1b[H\x1b[2J\x1b[3J";
-    match OpenOptions::new().write(true).open("/dev/tty") {
-        Ok(mut tty) => {
-            let _ = tty.write_all(clear);
-        }
-        Err(_) => {
-            let _ = io::stderr().write_all(clear);
-        }
-    }
-    if std::env::var_os("TMUX").is_some() {
-        let mut tmux = std::process::Command::new("tmux");
-        tmux.arg("clear-history");
-        if let Some(pane) = std::env::var_os("TMUX_PANE") {
-            tmux.arg("-t").arg(pane);
-        }
-        let quiet = std::process::Stdio::null;
-        let _ = tmux.stdin(quiet()).stdout(quiet()).stderr(quiet()).status();
-    }
+/// Waits for Enter at the terminal on standard input. Ctrl-C returns
+/// `Interrupted`.
+pub fn press_enter() -> Result<()> {
+    let _raw = RawMode::enter(libc::STDIN_FILENO)?;
+    wait_for_enter(libc::STDIN_FILENO)
 }
 
 /// A progress line on standard error for long jobs, shown only on a terminal

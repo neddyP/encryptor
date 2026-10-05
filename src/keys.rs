@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::explain::{self, Action};
 use crate::files::clean_path;
 use crate::term::{self, Shown, choose, confirm, safe, safe_path};
-use crate::{protect, recording, wipe};
+use crate::{protect, recording, session, wipe};
 
 /// Key bytes live on the heap, locked in RAM, so moving the handle never
 /// copies the key and it is never swapped out. They are zeroed when dropped.
@@ -122,6 +122,7 @@ fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Resu
     key_file.0 = Some(path.clone());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     eprintln!("Key saved as: {}", safe(&name));
+    session::remember(format!("Key saved as: {}", safe(&name)));
     eprintln!("Keep this file safe: anyone who has it can decrypt the file, and");
     eprintln!("without the key the file cannot be decrypted.");
     Ok(path)

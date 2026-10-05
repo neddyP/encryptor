@@ -14,11 +14,12 @@ use crate::keys::{self, KeySource, Printed, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe_path};
-use crate::{KEY_LEN, desktop, history, protect, stream, wipe};
+use crate::{KEY_LEN, desktop, history, protect, session, stream, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("encrypt", file)?;
     files::input_len("encrypt", &input)?;
+    session::remember(format!("File to encrypt: {}", safe_path(&input)));
     let output = files::encrypted_path(&input);
     if output.exists() {
         return Err(Error::File(explain::output_exists(&output)));

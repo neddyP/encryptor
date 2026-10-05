@@ -71,9 +71,11 @@ See [Install](#install) for details, including permission errors.
   removed with the entries holding it, in case it was ever typed or pasted
   into a command. The files are rewritten in place, and the bytes left over
   are zeroed before they're cut short.
-- **Terminal wiped when you're done.** After the report, you're offered to
-  save it as a text file, then pressing Enter wipes the terminal: the screen
-  and its scrollback, and in tmux, the pane's history.
+- **Runs on a screen of its own, wiped when you're done.** At a terminal,
+  whatever the command, encryptor takes over the window, with its name in
+  large letters at the top. When you press Enter at the end, everything it
+  showed is wiped and your window comes back as it was, with all its earlier
+  history. None of it reaches the window's scrollback.
 - **Warned about disks that keep old copies.** On a copy-on-write filesystem
   (APFS, btrfs, ZFS and the like) overwriting can't reach a file's old
   contents, so you're told and asked before encrypting.
@@ -209,17 +211,26 @@ advance, so it isn't asked:
 | `-h`, `--help`        | Show the usage                                                      |
 | `-V`, `--version`     | Show the version and the file formats it reads                      |
 
-Run on its own in a terminal, `encryptor` shows a home screen: its name in
-large letters, the version and this help. Press `e` to encrypt a file, `d` to
-decrypt one, or `q` to quit; the arrow keys scroll if it doesn't all fit.
-Without a terminal it asks "Encrypt or decrypt?" instead.
+At a terminal, every run, whatever the command or options, opens on a screen
+of its own (the terminal's alternate screen, as used by `less` and `vim`),
+with encryptor's name in large letters at the top. It ends with `Press Enter
+to exit and wipe this screen`, after which everything it showed is gone and
+your window is back as it was, earlier history and all. An error is shown
+there before you press Enter. `q` on the home screen and Ctrl-C close it
+straight away. In scripts, with no terminal, everything is printed as usual.
+
+Run on its own, or with `--help`, `encryptor` shows a home screen: its name,
+the version and this help. Press `e` to encrypt a file, `d` to decrypt one,
+or `q` to quit; the arrow keys scroll if it doesn't all fit. Without a
+terminal it asks "Encrypt or decrypt?" instead.
 
 If you leave out `FILE`, you're asked for it. Typed paths may be quoted or
 start with `~/`, so you can drag a file into the terminal.
 
 Questions, warnings and errors go to standard error, and only the final
 report to standard output, so `encrypt report.pdf > report.txt` still shows
-every question and saves just the report.
+every question and saves just the report. With its output redirected like
+this, it runs in the window itself rather than on a screen of its own.
 
 `encrypt` takes one file at a time. To encrypt a folder or several files, zip
 them into a single file first. Given a folder or more than one file, `encrypt`
@@ -272,7 +283,7 @@ Encrypt using AES-256-GCM? [y/n]: y
 ----------------------------------------------------------------
 Save this summary as report.pdf.encryption-summary.txt in the current folder? [y/n]: n
 
-Press Enter to wipe the terminal:
+Press Enter to exit and wipe this screen:
 ```
 
 The prompts go in this order:
@@ -289,9 +300,9 @@ The prompts go in this order:
 2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
    `<file>.key` in the **current directory**, readable only by you (a number
    is added if the name is taken).
-3. **Print the key?** `y` shows it once as 64 hex characters on the
-   terminal's alternate screen; press Enter when you've copied it and it's
-   erased. Printing needs an interactive terminal and is refused when there
+3. **Print the key?** `y` clears the screen and shows the key once as 64
+   hex characters; press Enter when you've copied it and it's erased, and
+   the screen is drawn again with the file and key file so far. Printing needs an interactive terminal and is refused when there
    isn't one. If [something is recording the
    session](#when-the-session-is-being-recorded), you're told what and asked
    whether to print anyway. You can answer `y` to both questions to keep two
@@ -304,14 +315,13 @@ The prompts go in this order:
    it never encrypted anything.
 5. **Save this summary?** `y` saves the report as
    `<file>.encryption-summary.txt` in the current directory, readable only
-   by you (a number is added if the name is taken).
-6. **Press Enter to wipe the terminal.** Everything in the terminal is
-   cleared, scrollback included, along with the pane's history in tmux.
-   If something recorded the session, it's named first, since its copy
-   can't be wiped. Ctrl-C wipes too.
-
-The last two are only asked at a terminal, and not with `--yes` or
-`--quiet`, so scripts never wait for them.
+   by you (a number is added if the name is taken). It's only asked at a
+   terminal, and not with `--yes` or `--quiet`, so scripts never wait for it.
+6. **Press Enter to exit and wipe this screen.** Everything encryptor showed
+   is erased and your window comes back as it was before you ran it. If
+   something recorded the session, it's named first, since its copy can't be
+   wiped. Ctrl-C exits too. This is the end of every run at a terminal,
+   whatever the options.
 
 If `FILE.enc` already exists, the tool refuses to run rather than overwrite it.
 
@@ -379,7 +389,7 @@ Decrypt using AES-256-GCM? [y/n]: y
 At the key prompt, either type or paste the hex key, or give the path to the
 key file (for example `report.pdf.key`). Neither is echoed. You get three
 attempts. As after encrypting, you're then offered to save the summary, as
-`<file>.decryption-summary.txt`, and Enter wipes the terminal.
+`<file>.decryption-summary.txt`, and Enter exits and wipes the screen.
 
 The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
@@ -579,6 +589,12 @@ starts with the metadata, as above; version 1's is just the contents.
     attachments, cloud sync and backups, desktop search indexes (GNOME's
     LocalSearch, KDE's Baloo), other programs' own lists of recent files,
     and on macOS, Quick Look's thumbnails and Spotlight.
+  - **The command you typed.** It was in your window before encryptor
+    started, so it's still there when the window comes back, with any file
+    name in it.
+  - **Terminals that keep the alternate screen.** iTerm2 can be set to save
+    lines scrolled off it into the scrollback, and GNU screen does so by
+    default.
   - **Terminal records.** Session recorders, terminal emulator logs and GNU
     screen's scrollback keep their own copy of what was shown, as do sudo
     I/O logs and process accounting where a system administrator has turned
@@ -642,7 +658,8 @@ The code is in `src/`:
 | `explain.rs`   | Error messages and their fixes                                       |
 | `error.rs`     | The error type                                                       |
 | `protect.rs`   | Process hardening, memory locking and zeroing, interrupts            |
-| `report.rs`    | The report printed on success, saving it, and wiping the terminal    |
+| `session.rs`   | The screen each run has to itself, and wiping it at the end          |
+| `report.rs`    | The report printed on success, and saving it                         |
 
 It uses the RustCrypto
 [`aes-gcm`](https://crates.io/crates/aes-gcm),

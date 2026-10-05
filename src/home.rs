@@ -1,17 +1,18 @@
 //! The home screen `encryptor` shows when run on its own in a terminal: the
 //! name in large letters, the version, the help, and keys to encrypt or
 //! decrypt a file. It is drawn on the alternate screen, like `less`, so the
-//! terminal is left as it was.
+//! terminal is left as it was. In a session (see `session`), the run is on
+//! the alternate screen already.
 
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::protect;
 use crate::term::RawMode;
+use crate::{protect, session};
 
 /// A padlock beside the name, as figlet's standard font draws it.
-const ART: [&str; 7] = [
+pub const ART: [&str; 7] = [
     r"   .----.",
     r"  / .--. \                                      _",
     r"  | |  | |      ___ _ __   ___ _ __ _   _ _ __ | |_ ___  _ __",
@@ -244,19 +245,26 @@ fn write(text: &str) -> Result<()> {
 }
 
 /// The alternate screen with the cursor hidden, until dropped, even on an
-/// error or Ctrl-C.
+/// error or Ctrl-C. In a session, the run is already on the alternate
+/// screen, which is left to the session.
 struct Screen;
 
 impl Screen {
     fn enter() -> Result<Self> {
-        write("\x1b[?1049h\x1b[?25l\x1b[2J")?;
+        match session::active() {
+            true => write("\x1b[?25l\x1b[2J")?,
+            false => write("\x1b[?1049h\x1b[?25l\x1b[2J")?,
+        }
         Ok(Self)
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let _ = write("\x1b[2J\x1b[?25h\x1b[?1049l");
+        let _ = match session::active() {
+            true => write("\x1b[2J\x1b[?25h"),
+            false => write("\x1b[2J\x1b[?25h\x1b[?1049l"),
+        };
     }
 }
 

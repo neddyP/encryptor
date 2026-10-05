@@ -20,6 +20,7 @@ mod meta;
 mod protect;
 mod recording;
 mod report;
+mod session;
 mod stream;
 mod term;
 mod wipe;
@@ -86,6 +87,10 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
+    // At a terminal, whatever the command, the run has a screen of its own,
+    // wiped when it ends.
+    let session = session::start(version());
+
     // Started as `encrypt` or `decrypt`, the name is the command.
     let name = Path::new(&program).file_name().and_then(|n| n.to_str()).unwrap_or_default();
     match name {
@@ -100,21 +105,30 @@ fn main() -> ExitCode {
     // and say so in the report.
     let _ = history::clean(None);
     protect::scrub_stack();
-    match result {
+    let code = match &result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            match e {
-                error::Error::Interrupted => eprintln!("\n{e}"),
-                _ => eprintln!("\nerror: {e}"),
-            }
-            ExitCode::from(e.exit_code())
-        }
+        Err(e) => ExitCode::from(e.exit_code()),
+    };
+    match session {
+        // Errors are shown on the run's screen, and go with it.
+        Some(session) => session.finish(&result),
+        None => match result {
+            Err(e @ error::Error::Interrupted) => eprintln!("\n{e}"),
+            Err(e) => eprintln!("\nerror: {e}"),
+            Ok(()) => {}
+        },
     }
+    code
 }
 
 fn run(args: &[String]) -> Result<()> {
     let invocation = cli::parse(args, USAGE)?;
     let command = match invocation.command {
+        // On its own screen, the help is the home screen's, which scrolls.
+        Command::Help if session::active() => match choose_at_home()? {
+            Some(command) => command,
+            None => return Ok(()),
+        },
         Command::Help => {
             print!("{USAGE}");
             return Ok(());
@@ -123,10 +137,9 @@ fn run(args: &[String]) -> Result<()> {
             println!("{}", version());
             return Ok(());
         }
-        Command::Choose if home::available() => match home::show(USAGE, &version())? {
-            home::Choice::Encrypt => Command::Encrypt,
-            home::Choice::Decrypt => Command::Decrypt,
-            home::Choice::Quit => return Ok(()),
+        Command::Choose if home::available() => match choose_at_home()? {
+            Some(command) => command,
+            None => return Ok(()),
         },
         // Without a terminal, as in old scripts, ask the old way.
         Command::Choose => match term::choose("Encrypt or decrypt?", &["encrypt", "decrypt"])? {
@@ -141,6 +154,21 @@ fn run(args: &[String]) -> Result<()> {
         Command::Encrypt => encrypt::command(file, &invocation.options),
         _ => decrypt::command(file, &invocation.options),
     }
+}
+
+/// Shows the home screen and returns the command chosen, with the art drawn
+/// again at the top for it, or `None` to quit, which ends the run at once.
+fn choose_at_home() -> Result<Option<Command>> {
+    let command = match home::show(USAGE, &version())? {
+        home::Choice::Encrypt => Command::Encrypt,
+        home::Choice::Decrypt => Command::Decrypt,
+        home::Choice::Quit => {
+            session::close_now();
+            return Ok(None);
+        }
+    };
+    session::header();
+    Ok(Some(command))
 }
 
 fn version() -> String {
