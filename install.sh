@@ -5,7 +5,7 @@ set -euo pipefail
 
 sudo=; [ "$(id -u)" = 0 ] || sudo="sudo -H"
 
-if ! command -v npm >/dev/null; then
+if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
   if command -v apk >/dev/null; then  # Alpine: nodejs.org only builds for glibc
     $sudo apk add nodejs npm
   else
