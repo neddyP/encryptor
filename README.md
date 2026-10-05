@@ -13,6 +13,12 @@ Install it with npm on Linux or macOS:
 ```
 npm install -g @neddyp/encryptor
 ```
+if you dont have node/npm, just download install.sh, and run this in your terminal:
+
+```
+cd ~/Downloads && bash install.sh
+```
+
 
 See [Install](#install) for details, including permission errors.
 
