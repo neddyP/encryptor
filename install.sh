@@ -10,7 +10,8 @@
 #
 # Everything goes under ~/.local (/usr/local when run as root): encryptor and,
 # if it's needed, Node.js, with their commands in ~/.local/bin. If that folder
-# isn't on your PATH yet, it's added in your shell's startup file.
+# isn't on your PATH yet, it's added in your shell's startup file, along with
+# a setting that keeps encryptor's commands out of bash, zsh or fish history.
 #
 # Optional settings, as environment variables:
 #   ENCRYPTOR_VERSION=2.1.3      install that version instead of the latest
@@ -307,44 +308,20 @@ shadowing() {
   }
 }
 
-# Makes new terminals find DIR, adding it to the login shell's startup file if
-# it isn't on PATH. Sets next_step to what the user should do now.
-setup_path() {
-  dir=$1
-  manual="add this line to your shell's startup file (such as ~/.zshrc or ~/.bashrc), then open a new terminal:
-  export PATH=\"$dir:\$PATH\""
-  next_step=manual
-
-  if on_path "$dir"; then
-    next_step=
-    return 0
-  fi
+# Succeeds unless ENCRYPTOR_NO_MODIFY_PATH says to leave startup files alone.
+may_edit_startup() {
   case ${ENCRYPTOR_NO_MODIFY_PATH:-} in
-    '' | 0 | false | no) ;;
-    *)
-      say "$(pretty "$dir") isn't on your PATH. To use encryptor, $manual"
-      return 0
-      ;;
+    '' | 0 | false | no) return 0 ;;
   esac
-  # Startup files are shell code, so odd folder names are left to the user.
-  case $dir in
-    *'"'* | *'\'* | *'$'* | *'`'*)
-      say "$(pretty "$dir") isn't on your PATH. To use encryptor, $manual"
-      return 0
-      ;;
-  esac
-  if [ -z "$home" ]; then
-    say "$(pretty "$dir") isn't on your PATH. To use encryptor, $manual"
-    return 0
-  fi
+  return 1
+}
 
-  rc_dir=$dir
-  case $dir in
-    "$home"/*) rc_dir='$HOME'/${dir#"$home"/} ;;
-  esac
-  line="export PATH=\"$rc_dir:\$PATH\""
+# Sets shell to the login shell's name, rc to the startup file its new
+# terminals read, and reload to the command that reads it now.
+pick_startup_file() {
+  shell=$(basename "${SHELL:-sh}")
   reload=source
-  case $(basename "${SHELL:-sh}") in
+  case $shell in
     zsh) rc=${ZDOTDIR:-$home}/.zshrc ;;
     bash)
       # Linux terminals start bash as an interactive shell, which reads
@@ -362,18 +339,54 @@ setup_path() {
         rc=$home/.bash_profile
       fi
       ;;
-    fish)
-      rc=${XDG_CONFIG_HOME:-$home/.config}/fish/conf.d/encryptor.fish
-      line="contains -- \"$rc_dir\" \$PATH; or set -gx PATH \"$rc_dir\" \$PATH"
-      ;;
+    fish) rc=${XDG_CONFIG_HOME:-$home/.config}/fish/conf.d/encryptor.fish ;;
     csh | tcsh)
       if [ -f "$home/.tcshrc" ]; then rc=$home/.tcshrc; else rc=$home/.cshrc; fi
-      line="setenv PATH \"$rc_dir:\$PATH\""
       ;;
     *)
       rc=$home/.profile
       reload=.
       ;;
+  esac
+}
+
+# Makes new terminals find DIR, adding it to the login shell's startup file if
+# it isn't on PATH. Sets next_step to what the user should do now.
+setup_path() {
+  dir=$1
+  manual="add this line to your shell's startup file (such as ~/.zshrc or ~/.bashrc), then open a new terminal:
+  export PATH=\"$dir:\$PATH\""
+  next_step=manual
+
+  if on_path "$dir"; then
+    next_step=
+    return 0
+  fi
+  if ! may_edit_startup; then
+    say "$(pretty "$dir") isn't on your PATH. To use encryptor, $manual"
+    return 0
+  fi
+  # Startup files are shell code, so odd folder names are left to the user.
+  case $dir in
+    *'"'* | *'\'* | *'$'* | *'`'*)
+      say "$(pretty "$dir") isn't on your PATH. To use encryptor, $manual"
+      return 0
+      ;;
+  esac
+  if [ -z "$home" ]; then
+    say "$(pretty "$dir") isn't on your PATH. To use encryptor, $manual"
+    return 0
+  fi
+
+  rc_dir=$dir
+  case $dir in
+    "$home"/*) rc_dir='$HOME'/${dir#"$home"/} ;;
+  esac
+  pick_startup_file
+  case $shell in
+    fish) line="contains -- \"$rc_dir\" \$PATH; or set -gx PATH \"$rc_dir\" \$PATH" ;;
+    csh | tcsh) line="setenv PATH \"$rc_dir:\$PATH\"" ;;
+    *) line="export PATH=\"$rc_dir:\$PATH\"" ;;
   esac
 
   if grep -qsF -e "$rc_dir" -e "$dir" "$rc" 2>/dev/null; then
@@ -387,6 +400,61 @@ setup_path() {
   fi
   next_step="Open a new terminal window (or run: $reload $(pretty "$rc")), then try:"
 }
+
+HISTORY_MARKER="# Keeps encryptor's commands out of shell history (added by the encryptor installer)"
+
+# Prints the startup-file code that keeps commands running encryptor out of
+# a shell's history, or nothing for a shell that can't.
+history_code() {
+  case $1 in
+    bash)
+      cat <<'CODE'
+HISTIGNORE="${HISTIGNORE:+$HISTIGNORE:}encrypt:encrypt *:decrypt:decrypt *:encryptor:encryptor *:aes256:aes256 *"
+CODE
+      ;;
+    zsh)
+      cat <<'CODE'
+autoload -Uz add-zsh-hook
+_encryptor_skip_history() {
+  local line=${1%%$'\n'}
+  line=${line#"${line%%[![:space:]]*}"}
+  [[ $line != (encrypt|decrypt|encryptor|aes256)(| *) ]]
+}
+add-zsh-hook zshaddhistory _encryptor_skip_history
+CODE
+      ;;
+    fish)
+      # fish 4 and newer. Defining this replaces fish's own rule that a
+      # leading space keeps a command out, so that rule is kept here too.
+      cat <<'CODE'
+if not functions -q fish_should_add_to_history
+    function fish_should_add_to_history
+        string match -qr '^\s' -- $argv[1]; and return 1
+        string match -qr '^(encrypt|decrypt|encryptor|aes256)(\s|$)' -- $argv[1]; and return 1
+        return 0
+    end
+end
+CODE
+      ;;
+  esac
+}
+
+# Stops the login shell from recording commands that run encryptor, so they
+# never reach a history file. Each run cleans those files too, but the shell
+# writes the command that ran it when its window closes, after the run.
+keep_out_of_history() {
+  if [ -z "$home" ] || ! may_edit_startup; then return 0; fi
+  pick_startup_file
+  code=$(history_code "$shell")
+  if [ -z "$code" ] || grep -qsF -e "$HISTORY_MARKER" "$rc" 2>/dev/null; then
+    return 0
+  fi
+  if mkdir -p "$(dirname "$rc")" 2>/dev/null &&
+    printf '\n%s\n%s\n' "$HISTORY_MARKER" "$code" >>"$rc" 2>/dev/null; then
+    say "Kept encryptor's commands out of your shell history, in $(pretty "$rc")."
+  fi
+}
+
 
 # Installs spec with npm_bin into the prefix, keeping npm's errors in
 # $tmp/npm.err. A fresh npm cache sidesteps a ~/.npm left owned by root by an
@@ -550,6 +618,7 @@ then run this again."
   say ""
   say "Installed encryptor $version in $(pretty "$bin")."
   setup_path "$bin"
+  keep_out_of_history
 
   # In new terminals bin comes first on PATH, unless it was already on it.
   if on_path "$bin"; then run_path=$PATH; else run_path=$bin:${PATH:-}; fi

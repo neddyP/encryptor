@@ -23,6 +23,7 @@ mod report;
 mod session;
 mod stream;
 mod term;
+mod timestamps;
 mod wipe;
 
 use std::ffi::OsString;
@@ -118,6 +119,9 @@ fn main() -> ExitCode {
             Ok(()) => {}
         },
     }
+    // Last, once nothing more will be read: the program's files shouldn't
+    // show when it ran.
+    timestamps::reset();
     code
 }
 

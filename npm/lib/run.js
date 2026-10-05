@@ -20,7 +20,10 @@ module.exports = function run(name) {
     process.exit(1);
   }
 
-  const child = spawn(binary, process.argv.slice(2), { stdio: "inherit", argv0: name });
+  // The binary sets the last-read times of its files back when it's done,
+  // including this Node.js and the link the command was run through.
+  const env = { ...process.env, ENCRYPTOR_NODE: process.execPath, ENCRYPTOR_LAUNCHED_AS: process.argv[1] };
+  const child = spawn(binary, process.argv.slice(2), { stdio: "inherit", argv0: name, env });
 
   // The binary handles Ctrl-C and similar signals itself, wiping keys and
   // removing partial files before it exits. Stay alive until it has, passing

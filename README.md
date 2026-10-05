@@ -19,6 +19,11 @@ if you dont have node/npm, just download install.sh, and run this in your termin
 cd ~/Downloads && bash install.sh
 ```
 
+install.sh installs Node.js first if needed, and never uses sudo. In your
+shell's startup file it adds `~/.local/bin` to your `PATH`, and for bash, zsh
+and fish 4 or newer, a setting that keeps commands running encryptor out of
+shell history.
+
 
 See [Install](#install) for details, including permission errors.
 
@@ -67,10 +72,16 @@ See [Install](#install) for details, including permission errors.
   it) are shredded, and its entry in the desktop's list of recently used
   files is removed.
 - **No trace in shell history.** Every run removes the entries in your bash,
-  zsh and fish history files that ran the tool, and every key it uses is
-  removed with the entries holding it, in case it was ever typed or pasted
-  into a command. The files are rewritten in place, and the bytes left over
-  are zeroed before they're cut short.
+  zsh and fish history files that ran the tool, including the history macOS's
+  Terminal keeps for each window (`~/.bash_sessions`, `~/.zsh_sessions`), and
+  every key it uses is removed with the entries holding it, in case it was
+  ever typed or pasted into a command. The files are rewritten in place, and
+  the bytes left over are zeroed before they're cut short. Installed with
+  install.sh, bash, zsh and fish 4+ don't record those commands at all.
+- **Its own files don't show when it ran.** Running a program reads its
+  files, which updates their last-read times. At the end of every run, those
+  of encryptor's files, the command's link and the Node.js that started it
+  are set back to when they were installed.
 - **Runs on a screen of its own, wiped when you're done.** At a terminal,
   whatever the command, encryptor takes over the window, with its name in
   large letters at the top. When you press Enter at the end, everything it
@@ -577,14 +588,18 @@ starts with the metadata, as above; version 1's is just the contents.
   but a run can still be told from:
   - **The command that ran it, in the shell you ran it from.** Shells keep
     their own session's history in memory and save it when they exit, after
-    the tool has finished, so it's only removed by a later run. Start the
+    the tool has finished, so it's only removed by a later run. install.sh
+    sets up bash, zsh and fish 4+ never to record it. Otherwise, start the
     command with a space to keep it out: bash does that with
     `HISTCONTROL=ignorespace` (or `ignoreboth`, Ubuntu's default), zsh with
     `setopt HIST_IGNORE_SPACE`, and fish always. Other shells left open can
     also write back entries they read when they started.
   - **Timestamps.** The `.enc` and `.key` files and their folder show when
-    they were written, and the tool's own program file shows when it was
-    last run, unless the disk is mounted with `noatime`.
+    they were written. The tool's own files have their last-read times set
+    back to when they were installed, but setting them updates their change
+    times (`ctime`, shown by `stat`), which no program can set, so those show
+    the last run instead. A Node.js the tool can't change, such as one owned
+    by root, keeps its last-read time.
   - **Copies other programs made.** Editor backups, downloads, email
     attachments, cloud sync and backups, desktop search indexes (GNOME's
     LocalSearch, KDE's Baloo), other programs' own lists of recent files,
@@ -647,6 +662,7 @@ The code is in `src/`:
 | `decrypt.rs`   | The decrypt command and its report                                   |
 | `keys.rs`      | Generating, saving, printing and entering keys                       |
 | `history.rs`   | Removing keys and runs of the tool from shell history                |
+| `timestamps.rs` | Setting its own files' last-read times back to install time     |
 | `desktop.rs`   | Removing the original's thumbnails and recently used entries         |
 | `stream.rs`    | Chunked encryption, format version 3                                 |
 | `legacy.rs`    | Decrypting format versions 1 and 2                                   |

@@ -1,6 +1,7 @@
 //! Shell history: removing every entry that holds a key or ran this tool from
-//! bash, zsh and fish history files, so neither the key nor the fact the tool
-//! was used is left there. Each file is rewritten in place and the bytes left
+//! bash, zsh and fish history files, including the history macOS's Terminal
+//! keeps for each window, so neither the key nor the fact the tool was used is
+//! left there. Each file is rewritten in place and the bytes left
 //! over are zeroed before it is cut short, so removed entries don't linger in
 //! freed disk blocks.
 //!
@@ -10,7 +11,7 @@
 //! bash's HISTCONTROL=ignorespace, zsh's HIST_IGNORE_SPACE, or in fish, by
 //! starting the command with a space).
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -24,17 +25,40 @@ use crate::wipe;
 /// The commands this tool can be run as.
 const NAMES: [&str; 4] = ["encrypt", "decrypt", "encryptor", "aes256"];
 
+/// Folders where macOS's Terminal keeps a history file for each window, as
+/// bash and zsh are set up there (/etc/bashrc_Apple_Terminal and
+/// /etc/zshrc_Apple_Terminal): `<window>.history`, and `<window>.historynew`
+/// while a window is open.
+const SESSION_FOLDERS: [&str; 2] = [".bash_sessions", ".zsh_sessions"];
+
 /// Shell history files that could hold a key typed or pasted into a command,
 /// or a command that ran this tool.
 pub fn files() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
-    let mut files: Vec<PathBuf> = std::env::var_os("HISTFILE").map(PathBuf::from).into_iter().collect();
+    let var = |name| std::env::var_os(name).map(PathBuf::from);
+    history_files(var("HOME"), var("XDG_DATA_HOME"), var("ZDOTDIR"), var("HISTFILE"))
+}
+
+fn history_files(
+    home: Option<PathBuf>,
+    data: Option<PathBuf>,
+    zdotdir: Option<PathBuf>,
+    histfile: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let data = data.or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+    let mut files: Vec<PathBuf> = histfile.into_iter().collect();
     if let Some(home) = &home {
         for name in [".bash_history", ".zsh_history", ".zhistory", ".histfile", ".sh_history"] {
             files.push(home.join(name));
+        }
+        let zsh_home = zdotdir.as_ref().unwrap_or(home);
+        for folder in [home.join(SESSION_FOLDERS[0]), zsh_home.join(SESSION_FOLDERS[1])] {
+            let Ok(entries) = fs::read_dir(&folder) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "history" || ext == "historynew") {
+                    files.push(path);
+                }
+            }
         }
     }
     if let Some(data) = data {
@@ -43,6 +67,30 @@ pub fn files() -> Vec<PathBuf> {
     files.sort();
     files.dedup();
     files
+}
+
+/// The files cleaned, for the report, with Terminal's per-window files counted
+/// by folder rather than named one by one.
+fn describe(cleaned: &[PathBuf], shown: impl Fn(&Path) -> String) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut folders: Vec<(&Path, usize)> = Vec::new();
+    for path in cleaned {
+        let folder = path.parent().filter(|dir| {
+            dir.file_name().is_some_and(|name| SESSION_FOLDERS.iter().any(|folder| name == *folder))
+        });
+        match folder {
+            Some(dir) => match folders.iter_mut().find(|(seen, _)| *seen == dir) {
+                Some((_, count)) => *count += 1,
+                None => folders.push((dir, 1)),
+            },
+            None => names.push(shown(path)),
+        }
+    }
+    for (dir, count) in folders {
+        let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+        names.push(format!("{}/ ({files})", shown(dir)));
+    }
+    names
 }
 
 /// Removes every entry holding `key`, if one is given, and every entry that
@@ -67,7 +115,7 @@ pub fn clean(key: Option<&[u8; KEY_LEN]>) -> String {
             Ok(removed) if removed.any() => {
                 total.key += removed.key;
                 total.runs += removed.runs;
-                cleaned.push(shown(&path));
+                cleaned.push(path);
             }
             Ok(_) => {}
             Err(e) => unreadable.push(format!("{} ({e})", shown(&path))),
@@ -81,7 +129,7 @@ pub fn clean(key: Option<&[u8; KEY_LEN]>) -> String {
         (held, ran) => format!("removed {} holding the key and {ran} that ran this tool", entries(held)),
     };
     if !cleaned.is_empty() {
-        status.push_str(&format!(", from {}", cleaned.join(", ")));
+        status.push_str(&format!(", from {}", describe(&cleaned, shown).join(", ")));
     }
     if !unreadable.is_empty() {
         status.push_str(&format!("; could not check {}", unreadable.join(", ")));
@@ -283,6 +331,54 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn includes_terminal_window_history_on_macos() {
+        let home = scratch("sessions");
+        let bash = home.join(".bash_sessions");
+        let zdot = home.join("zdot");
+        let zsh = zdot.join(".zsh_sessions");
+        for dir in [&bash, &zsh] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for file in ["A.history", "A.historynew", "A.session", "_expiration_check_timestamp"] {
+            fs::write(bash.join(file), b"").unwrap();
+        }
+        fs::write(zsh.join("B.history"), b"").unwrap();
+        fs::write(home.join(".zsh_sessions"), b"").unwrap();
+
+        let files = history_files(Some(home.clone()), None, Some(zdot), None);
+        assert!(files.contains(&bash.join("A.history")));
+        assert!(files.contains(&bash.join("A.historynew")));
+        assert!(files.contains(&zsh.join("B.history")), "zsh's folder follows ZDOTDIR");
+        assert!(!files.iter().any(|f| f.ends_with("A.session") || f.ends_with("_expiration_check_timestamp")));
+        assert!(files.contains(&home.join(".bash_history")));
+    }
+
+    #[test]
+    fn counts_window_history_files_by_folder() {
+        let cleaned = [
+            PathBuf::from("/h/.bash_history"),
+            PathBuf::from("/h/.bash_sessions/A.history"),
+            PathBuf::from("/h/.bash_sessions/B.history"),
+            PathBuf::from("/h/.zsh_sessions/C.history"),
+        ];
+        let shown = |p: &Path| p.to_string_lossy().replace("/h/", "~/");
+        assert_eq!(
+            describe(&cleaned, shown),
+            ["~/.bash_history", "~/.bash_sessions/ (2 files)", "~/.zsh_sessions/ (1 file)"]
+        );
+    }
+
+    #[test]
+    fn cleans_a_terminal_window_history_file() {
+        let dir = scratch("window").join(".bash_sessions");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("A.history");
+        fs::write(&path, b"ls\nencrypt report.pdf\ncd ~\n").unwrap();
+        assert_eq!(clean_file(&path, None).unwrap().runs, 1);
+        assert_eq!(fs::read(&path).unwrap(), b"ls\ncd ~\n");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("encryptor-history-{}-{name}", std::process::id()));
