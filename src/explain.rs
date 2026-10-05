@@ -408,6 +408,10 @@ pub fn cant_overwrite(path: &Path, e: &io::Error) -> String {
     )
 }
 
+/// Said after the copy-on-write warning on a Mac whose FileVault is off.
+pub const FILEVAULT_OFF: &str = "FileVault is off on this Mac, so those old contents are readable to anyone \
+     with the disk. Turn it on in System Settings > Privacy & Security > FileVault, then encrypt.";
+
 /// The original is on a filesystem that writes changes somewhere new, so
 /// overwriting it can't reach its old contents.
 pub fn copy_on_write(path: &Path, filesystem: &str) -> String {

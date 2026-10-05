@@ -11,7 +11,7 @@ use crate::files::{self, PartFile, Replaced};
 use crate::keys;
 use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe, safe_path};
-use crate::{MAGIC, VERSION, history, legacy, protect, stream, wipe};
+use crate::{MAGIC, VERSION, history, legacy, protect, stream, timestamps, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("decrypt", file)?;
@@ -75,6 +75,11 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         return Ok(());
     }
 
+    // The folders this writes in (for the decrypted file and a saved summary)
+    // have their modified times set back when this returns.
+    let _dir_times =
+        timestamps::DirTimes::capture([files::parent_dir(&output), std::env::current_dir().unwrap_or_default()]);
+
     let started = Instant::now();
     let mut out = PartFile::create(&output, replace)?;
     let (metadata, plain_len, plain_hash) = if version == stream::VERSION {
@@ -130,7 +135,10 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         Replaced::Shredded => "; the file it replaced was overwritten with zeros",
         Replaced::Unlinked => "; the file it replaced was deleted but not overwritten, as other names lead to it",
     };
-    let name = output.file_name().unwrap_or_default().to_string_lossy();
+    let mut secrets = vec![safe_path(&input), safe_path(&output)];
+    if let Some(path) = &options.key_file {
+        secrets.push(safe_path(path));
+    }
     report::show(
         "DECRYPTION SUCCESSFUL",
         &[
@@ -145,8 +153,9 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             ("Shell history", history),
             ("Time", format!("{elapsed:.2?}")),
         ],
-        &format!("{name}.decryption-summary"),
+        "decryption-summary",
         interactive && !options.yes,
+        &secrets,
     )
 }
 

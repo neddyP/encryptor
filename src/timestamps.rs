@@ -65,6 +65,65 @@ fn is_package(dir: &Path) -> bool {
     fs::read_to_string(dir.join("package.json")).is_ok_and(|json| json.contains("\"@neddyp/encryptor\""))
 }
 
+/// The access and modified times of the folders a run writes in, captured up
+/// front so they can be set back afterwards: creating, deleting or renaming a
+/// file sets its folder's modified time to the run, which this undoes. The
+/// folder's change time (ctime) still moves, which no program can set.
+/// A folder, and its access and modified times as (seconds, nanoseconds).
+type DirTime = (PathBuf, (i64, i64), (i64, i64));
+
+pub struct DirTimes(Vec<DirTime>);
+
+impl DirTimes {
+    /// Captures the times of each distinct, existing folder in `dirs`. Call it
+    /// before the run writes anything; restoring happens when it's dropped.
+    pub fn capture<I: IntoIterator<Item = PathBuf>>(dirs: I) -> Self {
+        let mut times: Vec<DirTime> = Vec::new();
+        for dir in dirs {
+            if dir.as_os_str().is_empty() || times.iter().any(|(seen, ..)| *seen == dir) {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(&dir)
+                && meta.is_dir()
+            {
+                times.push((dir, (meta.atime(), meta.atime_nsec()), (meta.mtime(), meta.mtime_nsec())));
+            }
+        }
+        Self(times)
+    }
+
+    fn restore(&self) {
+        for (dir, atime, mtime) in &self.0 {
+            // If the folder's modified time hasn't moved, the run didn't change
+            // it, so leave it rather than move its change time for nothing.
+            if fs::metadata(dir).is_ok_and(|m| (m.mtime(), m.mtime_nsec()) == *mtime) {
+                continue;
+            }
+            let (Ok(path), Some(atime), Some(mtime)) =
+                (CString::new(dir.as_os_str().as_bytes()), timespec(*atime), timespec(*mtime))
+            else {
+                continue;
+            };
+            let times = [atime, mtime];
+            // SAFETY: a valid C path and two timespecs, as utimensat takes.
+            unsafe {
+                libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+}
+
+impl Drop for DirTimes {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// A seconds-and-nanoseconds pair as a `timespec`, or `None` if it doesn't fit.
+fn timespec((secs, nanos): (i64, i64)) -> Option<libc::timespec> {
+    Some(libc::timespec { tv_sec: libc::time_t::try_from(secs).ok()?, tv_nsec: libc::c_long::try_from(nanos).ok()? })
+}
+
 /// Sets the last-read time of `path` to when it was created, or if the system
 /// doesn't keep that, last modified, leaving its modified time alone. Only a
 /// file read since it last changed is set back: otherwise its last-read time
@@ -136,6 +195,24 @@ mod tests {
         let after = fs::metadata(&file).unwrap();
         assert_eq!((after.ctime(), after.ctime_nsec()), (before.ctime(), before.ctime_nsec()), "change time untouched");
         assert_eq!(after.accessed().unwrap(), before.accessed().unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sets_a_folders_modified_time_back_when_dropped() {
+        let dir = std::env::temp_dir().join(format!("encryptor-dirtimes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let before = fs::metadata(&dir).unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        {
+            let _times = DirTimes::capture([dir.clone(), dir.clone(), PathBuf::new()]);
+            // Writing a file moves the folder's modified time forward.
+            fs::write(dir.join("report.pdf.enc"), b"x").unwrap();
+            assert!(fs::metadata(&dir).unwrap().mtime() > before.mtime());
+        }
+        let after = fs::metadata(&dir).unwrap();
+        assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()), "set back on drop");
         let _ = fs::remove_dir_all(&dir);
     }
 

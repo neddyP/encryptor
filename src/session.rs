@@ -111,6 +111,16 @@ impl Session {
                 eprint!("{recorder}");
             }
         }
+        // iTerm2 can be set to keep what a full-screen program showed once it
+        // exits. That setting can't be read from here, so it's named rather
+        // than detected.
+        if std::env::var_os("TERM_PROGRAM").is_some_and(|name| name == "iTerm.app") {
+            eprintln!();
+            eprintln!(
+                "note: if you've turned on iTerm2's \"Save lines to scrollback when an app\n\
+                 leaves the alternate screen\", wiping this screen won't remove them."
+            );
+        }
         eprint!("\nPress Enter to exit and wipe this screen: ");
         // Ctrl-C here exits too.
         let _ = term::press_enter();

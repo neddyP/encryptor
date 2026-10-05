@@ -81,7 +81,12 @@ See [Install](#install) for details, including permission errors.
 - **Its own files don't show when it ran.** Running a program reads its
   files, which updates their last-read times. At the end of every run, those
   of encryptor's files, the command's link and the Node.js that started it
-  are set back to when they were installed.
+  are set back to when they were installed. The folders a run writes in get
+  their modified times set back to what they were before it started.
+- **Saved summaries don't name the file.** The report on screen is complete,
+  but a summary you choose to save is called `encryption-summary.txt` (or
+  `decryption-summary.txt`), and every file name and path in it is replaced
+  with `…`. It says what was done, not to which file.
 - **Runs on a screen of its own, wiped when you're done.** At a terminal,
   whatever the command, encryptor takes over the window, with its name in
   large letters at the top. When you press Enter at the end, everything it
@@ -292,7 +297,7 @@ Encrypt using AES-256-GCM? [y/n]: y
   Shell history  removed 2 entries that ran this tool, from ~/.bash_history
   Time           15.75ms
 ----------------------------------------------------------------
-Save this summary as report.pdf.encryption-summary.txt in the current folder? [y/n]: n
+Save this summary as encryption-summary.txt in the current folder? [y/n]: n
 
 Press Enter to exit and wipe this screen:
 ```
@@ -304,17 +309,20 @@ The prompts go in this order:
    place on the disk. Overwriting the original then can't reach its old
    contents, which stay on the disk until the space is reused, and in any
    snapshots. Full-disk encryption (FileVault or LUKS) keeps them unreadable
-   without your password. It's only asked at a terminal: with `--yes`, or in
-   a script, the warning is shown and encrypting goes ahead.
+   without your password; on a Mac with FileVault off, the warning says so.
+   It's only asked at a terminal: with `--yes`, or in a script, the warning
+   is shown and encrypting goes ahead.
 1. **Generate a random key?** Answer `n` to enter your own key instead; the
    save and print questions are then skipped.
 2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
    `<file>.key` in the **current directory**, readable only by you (a number
    is added if the name is taken).
 3. **Print the key?** `y` clears the screen and shows the key once as 64
-   hex characters; press Enter when you've copied it and it's erased, and
-   the screen is drawn again with the file and key file so far. Printing needs an interactive terminal and is refused when there
-   isn't one. If [something is recording the
+   hex characters; press Enter when you've written it down and it's erased,
+   and the screen is drawn again with the file and key file so far. The key
+   screen warns that selecting the key to copy it puts it on your clipboard,
+   where clipboard history keeps a copy. Printing needs an interactive
+   terminal and is refused when there isn't one. If [something is recording the
    session](#when-the-session-is-being-recorded), you're told what and asked
    whether to print anyway. You can answer `y` to both questions to keep two
    copies.
@@ -324,9 +332,9 @@ The prompts go in this order:
    choose one.
 4. **Encrypt?** `n` cancels. A key file saved earlier is then removed, since
    it never encrypted anything.
-5. **Save this summary?** `y` saves the report as
-   `<file>.encryption-summary.txt` in the current directory, readable only
-   by you (a number is added if the name is taken). It's only asked at a
+5. **Save this summary?** `y` saves the report as `encryption-summary.txt`
+   in the current directory, readable only by you (a number is added if the
+   name is taken), with every file name and path left out. It's only asked at a
    terminal, and not with `--yes` or `--quiet`, so scripts never wait for it.
 6. **Press Enter to exit and wipe this screen.** Everything encryptor showed
    is erased and your window comes back as it was before you ran it. If
@@ -400,7 +408,8 @@ Decrypt using AES-256-GCM? [y/n]: y
 At the key prompt, either type or paste the hex key, or give the path to the
 key file (for example `report.pdf.key`). Neither is echoed. You get three
 attempts. As after encrypting, you're then offered to save the summary, as
-`<file>.decryption-summary.txt`, and Enter exits and wipes the screen.
+`decryption-summary.txt` with names and paths left out, and Enter exits and
+wipes the screen.
 
 The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
@@ -594,8 +603,9 @@ starts with the metadata, as above; version 1's is just the contents.
     `HISTCONTROL=ignorespace` (or `ignoreboth`, Ubuntu's default), zsh with
     `setopt HIST_IGNORE_SPACE`, and fish always. Other shells left open can
     also write back entries they read when they started.
-  - **Timestamps.** The `.enc` and `.key` files and their folder show when
-    they were written. The tool's own files have their last-read times set
+  - **Timestamps.** The `.enc` and `.key` files show when they were
+    written. Their folders' modified times are set back, which updates the
+    folders' change times instead. The tool's own files have their last-read times set
     back to when they were installed, but setting them updates their change
     times (`ctime`, shown by `stat`), which no program can set, so those show
     the last run instead. Only files actually read are set back, so on disks
@@ -610,8 +620,8 @@ starts with the metadata, as above; version 1's is just the contents.
     started, so it's still there when the window comes back, with any file
     name in it.
   - **Terminals that keep the alternate screen.** iTerm2 can be set to save
-    lines scrolled off it into the scrollback, and GNU screen does so by
-    default.
+    lines scrolled off it into the scrollback (encryptor reminds you of this
+    in iTerm2), and GNU screen does so by default.
   - **Terminal records.** Session recorders, terminal emulator logs and GNU
     screen's scrollback keep their own copy of what was shown, as do sudo
     I/O logs and process accounting where a system administrator has turned

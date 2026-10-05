@@ -14,7 +14,7 @@ use crate::keys::{self, KeySource, Printed, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe_path};
-use crate::{KEY_LEN, desktop, history, protect, session, stream, wipe};
+use crate::{KEY_LEN, desktop, history, protect, session, stream, timestamps, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("encrypt", file)?;
@@ -24,6 +24,14 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     if output.exists() {
         return Err(Error::File(explain::output_exists(&output)));
     }
+    // The folders this writes in (for the output, the original and a saved key
+    // or summary) have their modified times set back when this returns, so
+    // they don't show when the run changed them.
+    let _dir_times = timestamps::DirTimes::capture([
+        files::parent_dir(&input),
+        files::parent_dir(&output),
+        std::env::current_dir().unwrap_or_default(),
+    ]);
     // Problems found now save asking for a key that can't be used. Unless
     // it's to be kept, the original is opened to be overwritten too, which
     // fails now if that couldn't be done later.
@@ -34,6 +42,9 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     }
     if let Some(filesystem) = files::copy_on_write(original.file()).filter(|_| !options.keep) {
         eprintln!("{}", explain::copy_on_write(&input, filesystem));
+        if files::filevault_off() == Some(true) {
+            eprintln!("{}", explain::FILEVAULT_OFF);
+        }
         // Only asked of someone at the keyboard: it's asked on some disks
         // and not others, so answers piped in would land on the wrong
         // questions. Scripts are warned, and carry on as with --yes.
@@ -163,9 +174,15 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         ("Shell history", history),
         ("Time", format!("{elapsed:.2?}")),
     ]);
-    let name = input.file_name().unwrap_or_default().to_string_lossy();
+    // The names and paths to leave out of a saved copy of the report.
+    let mut secrets = vec![safe_path(&input), safe_path(&output)];
+    match &source {
+        KeySource::Generated { saved_to: Some(path), .. } => secrets.push(safe_path(path)),
+        KeySource::FromFile { path, .. } => secrets.push(safe_path(path)),
+        _ => {}
+    }
     let ask = io::stdin().is_terminal() && !options.yes;
-    report::show("ENCRYPTION SUCCESSFUL", &rows, &format!("{name}.encryption-summary"), ask)
+    report::show("ENCRYPTION SUCCESSFUL", &rows, "encryption-summary", ask, &secrets)
 }
 
 /// Where a generated key went, for the report.

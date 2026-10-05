@@ -112,7 +112,9 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
         .and_then(|()| {
             tty.write_all(
                 b"\r\n\r\nWrite it down or put it in a password manager. Without it the file\r\n\
-                  cannot be decrypted.\r\n\r\n",
+                  cannot be decrypted.\r\n\r\n\
+                  Selecting it to copy puts it on your clipboard, which compromises\r\n\
+                  your security: clipboard history keeps a copy. Type it in instead.\r\n\r\n",
             )
         })
         // The prompt on the bottom row, when there's room below the key.

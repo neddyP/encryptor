@@ -272,6 +272,38 @@ fn shred_in_place(path: &Path) -> Replaced {
 /// The filesystem `file` is on, if it's one that writes changes to a new
 /// place on the disk rather than over the old data, so overwriting a file
 /// leaves its old contents where they were.
+/// Whether FileVault, macOS's full-disk encryption, is off: `Some(true)` if
+/// it's off, `Some(false)` if on, `None` where it can't be told (or on Linux,
+/// which has no FileVault). Asked of `fdesetup status`, which any user can
+/// run.
+pub fn filevault_off() -> Option<bool> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = std::process::Command::new("/usr/bin/fdesetup")
+        .arg("status")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    filevault_status_off(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Reads `fdesetup status`: "FileVault is On." or "FileVault is Off.", and
+/// while it's changing, "Encryption in progress" or "Decryption in progress".
+/// A disk still being encrypted or decrypted counts as off, since part of it
+/// isn't yet protected.
+fn filevault_status_off(status: &str) -> Option<bool> {
+    let status = status.to_ascii_lowercase();
+    if status.contains("in progress") || status.contains("filevault is off") {
+        Some(true)
+    } else if status.contains("filevault is on") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 pub fn copy_on_write(file: &File) -> Option<&'static str> {
     // SAFETY: statfs is plain data, filled in by fstatfs before it's read.
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
@@ -322,6 +354,12 @@ pub fn encrypted_path(input: &Path) -> PathBuf {
     with_suffix(input, &format!(".{ENC_EXT}"))
 }
 
+/// The folder `path` is in, or an empty path when it names no folder (a bare
+/// name, whose folder is the current one).
+pub fn parent_dir(path: &Path) -> PathBuf {
+    path.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
 pub fn decrypted_path(input: &Path) -> PathBuf {
     if input.extension().is_some_and(|ext| ext == ENC_EXT) {
         input.with_extension("")
@@ -363,6 +401,15 @@ pub fn clean_path(raw: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_whether_filevault_is_off() {
+        assert_eq!(filevault_status_off("FileVault is Off.\n"), Some(true));
+        assert_eq!(filevault_status_off("FileVault is On.\n"), Some(false));
+        assert_eq!(filevault_status_off("Encryption in progress: Percent completed = 40.2\n"), Some(true));
+        assert_eq!(filevault_status_off("Decryption in progress: Percent completed = 10\n"), Some(true));
+        assert_eq!(filevault_status_off(""), None, "unknown when it says nothing useful");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("encryptor-files-{}-{name}", std::process::id()));
