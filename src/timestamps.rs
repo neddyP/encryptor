@@ -3,13 +3,16 @@
 //! binary, and when it's installed with npm, the package's launcher, the
 //! command's link and the Node.js that runs the launcher. Left alone, their
 //! last-read times would show when it last ran. Setting them back updates
-//! their change times (ctime) instead, which no program can set.
+//! their change times (ctime) instead, which no program can set, so only
+//! files read since they last changed are set back. Where the disk doesn't
+//! record reads (mounted with `noatime`), nothing is touched.
 
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 /// Set by the npm package's launcher: the Node.js that ran it, and the
 /// command it was started as, which is usually a link.
@@ -63,10 +66,18 @@ fn is_package(dir: &Path) -> bool {
 }
 
 /// Sets the last-read time of `path` to when it was created, or if the system
-/// doesn't keep that, last modified, leaving its modified time alone.
+/// doesn't keep that, last modified, leaving its modified time alone. Only a
+/// file read since it last changed is set back: otherwise its last-read time
+/// shows nothing new, as on disks mounted with `noatime`, and setting it would
+/// only stamp its change time with the run.
 fn set_back(path: &Path, follow: bool) {
     let metadata = if follow { fs::metadata(path) } else { fs::symlink_metadata(path) };
     let Ok(metadata) = metadata else { return };
+    let (Ok(secs), Ok(nanos)) = (u64::try_from(metadata.ctime()), u32::try_from(metadata.ctime_nsec())) else { return };
+    let changed = UNIX_EPOCH + Duration::new(secs, nanos);
+    if !metadata.accessed().is_ok_and(|read| read > changed) {
+        return;
+    }
     let Ok(when) = metadata.created().or_else(|_| metadata.modified()) else { return };
     let Ok(since) = when.duration_since(UNIX_EPOCH) else { return };
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else { return };
@@ -85,8 +96,6 @@ fn set_back(path: &Path, follow: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
-    use std::time::Duration;
 
     #[test]
     fn sets_the_last_read_time_back_and_keeps_the_modified_time() {
@@ -111,6 +120,22 @@ mod tests {
         assert_eq!(after.accessed().unwrap(), created, "back to when it was made");
         assert_eq!(after.mtime(), before.mtime());
         assert_eq!(after.mtime_nsec(), before.mtime_nsec());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaves_a_file_not_read_since_alone() {
+        let dir = std::env::temp_dir().join(format!("encryptor-unread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("encryptor");
+        fs::write(&file, b"x").unwrap();
+        let before = fs::metadata(&file).unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        set_back(&file, true);
+        let after = fs::metadata(&file).unwrap();
+        assert_eq!((after.ctime(), after.ctime_nsec()), (before.ctime(), before.ctime_nsec()), "change time untouched");
+        assert_eq!(after.accessed().unwrap(), before.accessed().unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 

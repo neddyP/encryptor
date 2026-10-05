@@ -598,8 +598,10 @@ starts with the metadata, as above; version 1's is just the contents.
     they were written. The tool's own files have their last-read times set
     back to when they were installed, but setting them updates their change
     times (`ctime`, shown by `stat`), which no program can set, so those show
-    the last run instead. A Node.js the tool can't change, such as one owned
-    by root, keeps its last-read time.
+    the last run instead. Only files actually read are set back, so on disks
+    that don't record reads (mounted with `noatime`) nothing changes. A
+    Node.js the tool can't change, such as one owned by root, keeps its
+    last-read time.
   - **Copies other programs made.** Editor backups, downloads, email
     attachments, cloud sync and backups, desktop search indexes (GNOME's
     LocalSearch, KDE's Baloo), other programs' own lists of recent files,
