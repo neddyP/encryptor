@@ -241,11 +241,12 @@ place_node() {
   say "Installed Node.js $node_version in $(pretty "$prefix")."
 }
 
-# Puts a working Node.js and npm in place, setting node_bin and npm_bin.
+# Puts a working Node.js and npm in place, setting node_bin and npm_bin. With
+# "fresh", always downloads one rather than using the system's package manager.
 install_node() {
   node_problem=
   if [ "$os" = linux ] && is_musl; then
-    if [ "$(id -u)" = 0 ] && has apk; then
+    if [ "${1:-}" != fresh ] && [ "$(id -u)" = 0 ] && has apk; then
       say "Installing Node.js with apk..."
       if apk add --no-cache nodejs npm &&
         usable_node "$(command -v node 2>/dev/null || true)"; then
@@ -387,6 +388,59 @@ setup_path() {
   next_step="Open a new terminal window (or run: $reload $(pretty "$rc")), then try:"
 }
 
+# Installs spec with npm_bin into the prefix, keeping npm's errors in
+# $tmp/npm.err. A fresh npm cache sidesteps a ~/.npm left owned by root by an
+# earlier sudo npm, a common cause of EACCES errors.
+npm_install() {
+  say "Installing $spec with npm..."
+  rm -rf "$tmp/npm-cache"
+  PATH=$(dirname "$node_bin"):$PATH "$npm_bin" install --global \
+    --prefix "$prefix" --cache "$tmp/npm-cache" --ignore-scripts --no-audit \
+    --no-fund --no-update-notifier --loglevel=error "$spec" \
+    </dev/null 2>"$tmp/npm.err"
+}
+
+npm_error_code() {
+  sed -n -e 's/^npm ERR! code //p' -e 's/^npm error code //p' "$tmp/npm.err" |
+    head -n 1
+}
+
+npm_first_error() {
+  sed -n -e 's/^npm ERR! //p' -e 's/^npm error //p' "$tmp/npm.err" |
+    grep -v '^code ' | head -n 1
+}
+
+# Succeeds unless npm failed for a reason a fresh npm would fail for too: the
+# network, the registry, a missing version, permissions or disk space.
+npm_may_be_broken() {
+  case $(npm_error_code) in
+    E404 | ETARGET | E401 | E403 | EBADPLATFORM | EINTEGRITY | EACCES | EPERM | \
+      EROFS | ENOSPC | EDQUOT | ENOTFOUND | EAI_AGAIN | ECONNREFUSED | \
+      ECONNRESET | ETIMEDOUT | ENETUNREACH | EHOSTUNREACH | EPROTO | \
+      ERR_SOCKET_TIMEOUT | *CERT* | *SIGNATURE* | UNABLE_TO_*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+npm_failed() {
+  cat "$tmp/npm.err" >&2
+  # npm's log is in the temporary folder, which is about to be removed.
+  log=
+  for f in "$tmp"/npm-cache/_logs/*.log; do
+    if [ -f "$f" ]; then log=$f; fi
+  done
+  log_dir=${TMPDIR:-/tmp}
+  log_dir=${log_dir%/}
+  if [ -n "$log" ] && cp "$log" "$log_dir/encryptor-npm.log" 2>/dev/null; then
+    log=" npm's full log is in $log_dir/encryptor-npm.log."
+  else
+    log=
+  fi
+  die "npm couldn't install $spec (its message is above).$log Check your internet connection and that the version exists, then run this again."
+}
+
 cleanup() {
   if [ -n "${tmp:-}" ]; then rm -rf "$tmp"; fi
 }
@@ -452,6 +506,7 @@ then run this again."
 
   say "Installing encryptor for $os_name ($arch) under $(pretty "$prefix")"
 
+  fresh_node=
   if find_node; then
     say "Using Node.js $("$node_bin" --version) at $(pretty "$node_bin")."
   else
@@ -461,30 +516,29 @@ then run this again."
       say "No Node.js $NODE_MIN or newer with npm was found."
     fi
     install_node
+    fresh_node=1
   fi
-  node_dir=$(dirname "$node_bin")
 
   wanted=${ENCRYPTOR_VERSION:-latest}
   wanted=${wanted#v}
   spec=$PACKAGE@$wanted
-  say "Installing $spec with npm..."
-  # A fresh npm cache sidesteps a ~/.npm left owned by root by an earlier
-  # sudo npm, a common cause of EACCES errors.
-  if ! PATH=$node_dir:$PATH "$npm_bin" install --global --prefix "$prefix" \
-    --cache "$tmp/npm-cache" --ignore-scripts --no-audit --no-fund \
-    --no-update-notifier --loglevel=error "$spec" </dev/null; then
-    # npm's log is in the temporary folder, which is about to be removed.
-    log=
-    for f in "$tmp"/npm-cache/_logs/*.log; do
-      if [ -f "$f" ]; then log=$f; fi
-    done
-    if [ -n "$log" ] && cp "$log" "${TMPDIR:-/tmp}/encryptor-npm.log" 2>/dev/null; then
-      log=" npm's full log is in ${TMPDIR:-/tmp}/encryptor-npm.log."
+  if ! npm_install; then
+    # An npm that was already here can be broken in ways `npm --version`
+    # doesn't show, typically by a newer Node.js unpacked over an older one,
+    # which leaves a mix of both npms' files ("LRU is not a constructor").
+    # Unless the error is one a fresh npm would hit too, install a fresh
+    # Node.js and npm and try again.
+    if [ -z "$fresh_node" ] && npm_may_be_broken; then
+      say ""
+      say "The npm at $(pretty "$npm_bin") failed ($(npm_first_error)), so installing a fresh Node.js and npm to use instead."
+      install_node fresh
+      fresh_node=1
+      npm_install || npm_failed
     else
-      log=
+      npm_failed
     fi
-    die "npm couldn't install $spec (its message is above).$log Check your internet connection and that the version exists, then run this again."
   fi
+  node_dir=$(dirname "$node_bin")
 
   check=$(PATH=$node_dir:$PATH "$bin/encryptor" --version </dev/null 2>&1) &&
     code=0 || code=$?
