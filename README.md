@@ -11,7 +11,7 @@ decrypt report.pdf.enc    # → report.pdf
 Install it on Linux or macOS with:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/neddyP/encryptor/master/install.sh | sh
 ```
 
 That downloads the one prebuilt binary for your system, about 1 MB, into
@@ -131,14 +131,14 @@ as any Raspberry Pi), and on macOS on Intel and Apple Silicon. It needs only
 curl or wget:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/neddyP/encryptor/master/install.sh | sh
 ```
 
-or `wget -qO- https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh`.
+or `wget -qO- https://raw.githubusercontent.com/neddyP/encryptor/master/install.sh | sh`.
 To read the script before running it, download it and run `sh install.sh`.
 
 It downloads the binary for your system from the latest
-[GitHub release](https://github.com/neddyp/encryptor/releases), over HTTPS
+[GitHub release](https://github.com/neddyP/encryptor/releases), over HTTPS
 only with curl, and installs it as `/usr/local/bin/encryptor`, with `encrypt`
 and `decrypt` linked to it. If you can't write to `/usr/local/bin` yourself,
 as usual unless you're root, it uses sudo for that, which asks for your
@@ -810,6 +810,46 @@ The npm package lives in `npm/`. `bin/*.js` are small Node launchers that run
 the binary for the platform, `vendor/<platform>/encryptor`, under their own
 name, which tells it what to do. `npm/stage.sh` fills `vendor/` in from the
 build artifacts.
+
+### When a release fails
+
+The jobs run in order: build and test, publish to npm, then attach the
+binaries to the GitHub release. Pushing the same tag again doesn't retry a
+release that got as far as npm: the workflow sees the version is already
+there and does nothing. Instead:
+
+- **Something went wrong in passing**, such as a network error or a runner
+  that died: re-run the failed jobs, from the run's page in the Actions tab
+  or with `gh run rerun <run-id> --failed`. They run again with the same
+  commit and, after the builds, the same binaries.
+- **A build or its tests failed.** Nothing was published. Fix the problem,
+  commit, then move the tag to the fix and push it again, which starts a
+  new run:
+
+  ```
+  git push origin master
+  git tag -f v2.2.0
+  git push origin :refs/tags/v2.2.0
+  git push origin v2.2.0
+  ```
+
+- **npm has the version, but attaching the binaries failed.** Re-run the
+  failed jobs, as above. If the run is too old for that (its build
+  artifacts are kept for 90 days), attach them by hand:
+
+  ```
+  gh run download <run-id> -n bin-linux -n bin-macos -D binaries
+  gh release create v2.2.0 --verify-tag --title v2.2.0 --notes ""   # if it has no release yet
+  gh release upload v2.2.0 binaries/*/encryptor-* --clobber
+  ```
+
+Until a release has its binaries, install.sh and `encryptor update` keep
+getting the previous one, as long as the new release doesn't exist yet. A
+release that exists without them, or with only some, is the latest release,
+so installing fails on the systems whose file is missing. For the same
+reason, write release notes by editing the release the workflow makes,
+rather than publishing one by hand before the workflow has attached the
+binaries.
 
 ## License
 

@@ -236,7 +236,7 @@ pub fn cant_update(exe: &Path) -> String {
         "this copy of encryptor, {}, wasn't installed with npm or install.sh, so it can't update \
          itself. If you built it from source, get the latest source and build it again. To install the \
          latest release in /usr/local/bin instead:\n  \
-         curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh",
+         curl -fsSL https://raw.githubusercontent.com/neddyP/encryptor/master/install.sh | sh",
         safe_path(exe)
     )
 }
