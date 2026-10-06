@@ -8,24 +8,21 @@ encrypt report.pdf        # → report.pdf.enc, original securely deleted
 decrypt report.pdf.enc    # → report.pdf
 ```
 
-Install it with npm on Linux or macOS:
+Install it on Linux or macOS with:
+
+```
+curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh
+```
+
+That downloads the one prebuilt binary for your system, about 1 MB, into
+`/usr/local/bin`. It needs nothing else: no Node.js, no Rust. Or install it
+with npm:
 
 ```
 npm install -g @neddyp/encryptor
 ```
-if you dont have node/npm, just download install.sh, and run this in your terminal:
 
-```
-cd ~/Downloads && bash install.sh
-```
-
-install.sh installs Node.js first if needed, and never uses sudo. In your
-shell's startup file it adds `~/.local/bin` to your `PATH`, and for bash, zsh
-and fish 4 or newer, a setting that keeps commands running encryptor out of
-shell history.
-
-
-See [Install](#install) for details, including permission errors.
+Either way, `encryptor update` updates it. See [Install](#install) for details.
 
 ## Features
 
@@ -76,13 +73,16 @@ See [Install](#install) for details, including permission errors.
   Terminal keeps for each window (`~/.bash_sessions`, `~/.zsh_sessions`), and
   every key it uses is removed with the entries holding it, in case it was
   ever typed or pasted into a command. The files are rewritten in place, and
-  the bytes left over are zeroed before they're cut short. Installed with
-  install.sh, bash, zsh and fish 4+ don't record those commands at all.
+  the bytes left over are zeroed before they're cut short.
 - **Its own files don't show when it ran.** Running a program reads its
-  files, which updates their last-read times. At the end of every run, those
-  of encryptor's files, the command's link and the Node.js that started it
-  are set back to when they were installed. The folders a run writes in get
-  their modified times set back to what they were before it started.
+  files, which updates their last-read times. At the end of every run, its
+  binary's last-read time is set back to when it was installed, and with the
+  npm package, so are the package's files, the command's link and the Node.js
+  that started it. The folders a run writes in get their modified times set
+  back to what they were before it started.
+- **Offline unless you update.** encryptor never connects to the network on
+  its own. `encryptor update` is the only thing that does, and only when you
+  run it.
 - **Saved summaries don't name the file.** The report on screen is complete,
   but a summary you choose to save is called `encryption-summary.txt` (or
   `decryption-summary.txt`), and every file name and path in it is replaced
@@ -122,6 +122,42 @@ See [Install](#install) for details, including permission errors.
 
 ## Install
 
+encryptor runs on Linux and macOS. Windows isn't supported.
+
+### With install.sh
+
+Works on Linux on x64, arm64, and 32-bit x86 and arm (ARMv6 or later, such
+as any Raspberry Pi), and on macOS on Intel and Apple Silicon. It needs only
+curl or wget:
+
+```
+curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh
+```
+
+or `wget -qO- https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh`.
+To read the script before running it, download it and run `sh install.sh`.
+
+It downloads the binary for your system from the latest
+[GitHub release](https://github.com/neddyp/encryptor/releases), over HTTPS
+only with curl, and installs it as `/usr/local/bin/encryptor`, owned by root,
+with `encrypt` and `decrypt` linked to it. Unless you run it as root, it uses
+sudo for that, which asks for your password. The binary is statically
+linked, so it runs on any distribution and needs nothing else installed.
+
+Check it worked:
+
+```
+encryptor --help
+```
+
+**Updating:** `encryptor update`, or run the install command again.
+
+**Uninstalling:**
+
+```
+cd /usr/local/bin && sudo rm encryptor encrypt decrypt
+```
+
 ### With npm
 
 Works on Linux and macOS, on both x64 and arm64 (Apple Silicon), with
@@ -159,7 +195,14 @@ npm config set prefix ~/.local
 npm install -g @neddyp/encryptor
 ```
 
-**Updating** to the latest release (add `sudo` if you installed with it):
+**Updating** to the latest release runs npm for you, with sudo if you
+installed with sudo:
+
+```
+encryptor update
+```
+
+or with npm directly (add `sudo` if you installed with it):
 
 ```
 npm install -g @neddyp/encryptor@latest
@@ -171,7 +214,15 @@ npm install -g @neddyp/encryptor@latest
 npm uninstall -g @neddyp/encryptor
 ```
 
-Windows isn't supported; npm refuses to install there with `EBADPLATFORM`.
+**Installed with the old install.sh?** It installed Node.js and the npm
+package under `~/.local`, without sudo. That copy keeps working, and
+`encryptor update` keeps updating it with npm. To switch to the binary in
+`/usr/local/bin`, remove the npm copy first, so the two don't compete on your
+`PATH`, then run the install command above:
+
+```
+npm uninstall -g --prefix ~/.local @neddyp/encryptor
+```
 
 ### From source
 
@@ -200,8 +251,10 @@ name) are symlinks to `target/release/encryptor`, so rebuilding updates them
 automatically. After a
 `cargo clean`, run `cargo build --release` again to bring them back.
 
-If you also have the npm package installed, whichever `encrypt` comes first
-on your `PATH` is the one that runs. `type -a encrypt` lists them all.
+A copy built from source is updated by pulling the latest source and
+building it again; `encryptor update` says so rather than replacing it. If
+you also installed it another way, whichever `encrypt` comes first on your
+`PATH` is the one that runs. `type -a encrypt` lists them all.
 
 ## Usage
 
@@ -209,7 +262,16 @@ on your `PATH` is the one that runs. `type -a encrypt` lists them all.
 encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
 decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
 encryptor                      show the home screen, to encrypt or decrypt
+encryptor update               update to the latest release
 ```
+
+`encryptor update` updates it the way it was installed. For a copy install.sh
+put in `/usr/local/bin`, it runs install.sh again, the copy built into the
+program rather than one fetched at update time. For the npm package, it runs
+npm, into the same place, with sudo if that place belongs to root. It ends by
+saying which version you went from and to, or that you already have the
+latest. It's the only time encryptor goes online; it never checks for
+updates by itself.
 
 `encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as
 `encrypt` and `decrypt`. Each option answers one of the questions in
@@ -597,9 +659,8 @@ starts with the metadata, as above; version 1's is just the contents.
   but a run can still be told from:
   - **The command that ran it, in the shell you ran it from.** Shells keep
     their own session's history in memory and save it when they exit, after
-    the tool has finished, so it's only removed by a later run. install.sh
-    sets up bash, zsh and fish 4+ never to record it. Otherwise, start the
-    command with a space to keep it out: bash does that with
+    the tool has finished, so it's only removed by a later run. To keep it
+    out, start the command with a space: bash does that with
     `HISTCONTROL=ignorespace` (or `ignoreboth`, Ubuntu's default), zsh with
     `setopt HIST_IGNORE_SPACE`, and fish always. Other shells left open can
     also write back entries they read when they started.
@@ -660,9 +721,10 @@ overwriting and deleting files (including when a file is swapped for a
 symlink part way through, is read-only, or has other names), removing shell
 history entries, thumbnails and recently used entries, escaping of untrusted file
 names, recognising recorders and the files they write to, storing and restoring
-metadata (including reading files from earlier versions), and the advice in
-error messages. `tests/cli.rs` runs the program itself as a script would, with
-its options, and checks its exit status and the files it leaves.
+metadata (including reading files from earlier versions), telling how a copy
+was installed so `encryptor update` can update it, and the advice in error
+messages. `tests/cli.rs` runs the program itself as a script would, with its
+options, and checks its exit status and the files it leaves.
 
 The code is in `src/`:
 
@@ -687,7 +749,12 @@ The code is in `src/`:
 | `error.rs`     | The error type                                                       |
 | `protect.rs`   | Process hardening, memory locking and zeroing, interrupts            |
 | `session.rs`   | The screen each run has to itself, and wiping it at the end          |
+| `home.rs`      | The home screen                                                      |
 | `report.rs`    | The report printed on success, and saving it                         |
+| `update.rs`    | `encryptor update`, the way it was installed                         |
+
+`install.sh`, at the top of the repo, is the installer, and is built into the
+program for `encryptor update` to run.
 
 It uses the RustCrypto
 [`aes-gcm`](https://crates.io/crates/aes-gcm),
@@ -702,24 +769,30 @@ It uses the RustCrypto
 
 Releases are built and published by `.github/workflows/release.yml`, using
 npm trusted publishing so no npm token is stored in the repo. Each release
-tests and builds static Linux binaries (x64 and arm64) and macOS binaries
-(x64 and arm64) and packs them into the npm package.
+tests and builds static Linux binaries (x64, arm64, and 32-bit x86 and arm)
+and macOS binaries (x64 and arm64). The x64 and arm64 ones are packed into
+the npm package, and all six are attached to the version's GitHub release as
+`encryptor-<os>-<arch>`, where install.sh downloads them from. A release you
+made by hand for the tag keeps its title and notes; otherwise one is made.
 
 - **Monthly, automatically.** On the 1st of each month, if anything that goes
   into the package (`src/`, `Cargo.toml`, `Cargo.lock`, `npm/`, `README.md`,
-  `LICENSE`) changed since the last `v*` tag, the workflow bumps the patch version,
-  commits and tags it as `github-actions[bot]`, and publishes. If you've
-  already raised the version by hand, it releases that version instead. If
-  nothing changed, it stops before building.
-- **Straight away, with a tag.** Set the new version in both `Cargo.toml` and
+  `LICENSE`, `install.sh`) changed since the last `v*` tag, the workflow bumps
+  the patch version, commits and tags it as `github-actions[bot]`, and
+  publishes. If you've already raised the version by hand, it releases that
+  version instead. If nothing changed, it stops before building.
+- **Straight away, with a tag.** Set the new version with
+  `.github/set-version.sh`, which updates `Cargo.toml`, `Cargo.lock` and
   `npm/package.json`, commit, then:
 
   ```
-  git tag v0.2.0
-  git push origin master v0.2.0
+  .github/set-version.sh 2.2.0
+  git commit -am "Bump version to 2.2.0"
+  git tag v2.2.0
+  git push origin master v2.2.0
   ```
 
-  The workflow stops if the tag and the two version numbers don't all match.
+  The workflow stops if the tag and the version numbers don't all match.
 - **Dry run.** Running the workflow by hand from the Actions tab does
   everything except the publish.
 

@@ -16,7 +16,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// Set by the npm package's launcher: the Node.js that ran it, and the
 /// command it was started as, which is usually a link.
-const NODE_VAR: &str = "ENCRYPTOR_NODE";
+pub const NODE_VAR: &str = "ENCRYPTOR_NODE";
 const LAUNCHED_AS_VAR: &str = "ENCRYPTOR_LAUNCHED_AS";
 
 /// Sets the last-read time of each of the program's files back to when the

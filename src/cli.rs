@@ -32,6 +32,7 @@ pub enum Command {
     Version,
     Encrypt,
     Decrypt,
+    Update,
     /// None given: ask which.
     Choose,
 }
@@ -100,6 +101,7 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
         Some("version") => Command::Version,
         Some("encrypt" | "enc" | "e") => Command::Encrypt,
         Some("decrypt" | "dec" | "d") => Command::Decrypt,
+        Some("update") => Command::Update,
         Some(other) => return Err(Error::Usage(explain::unknown_command(other, usage))),
         None => Command::Choose,
     };
@@ -107,6 +109,9 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
     let files: Vec<String> = words.collect();
     if matches!(command, Command::Help | Command::Version) {
         return Ok(Invocation { command, file: None, options });
+    }
+    if command == Command::Update && !files.is_empty() {
+        return Err(Error::Usage("update doesn't take a file. Run it on its own: encryptor update".into()));
     }
     if files.len() > 1 {
         return Err(Error::Usage(match command {
@@ -127,7 +132,17 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
             "--key-file and --new-key can't be used together: encrypt with an existing key or a new one".into(),
         ));
     }
+    let any = options.key_file.is_some()
+        || options.new_key.is_some()
+        || options.output.is_some()
+        || options.keep
+        || options.overwrite
+        || options.yes
+        || options.quiet;
     match command {
+        Command::Update if any => {
+            Err(Error::Usage("update doesn't take options. Run it on its own: encryptor update".into()))
+        }
         Command::Encrypt if options.output.is_some() => only("--output", "decrypt"),
         Command::Encrypt if options.overwrite => only("--overwrite", "decrypt"),
         Command::Decrypt if options.new_key.is_some() => only("--new-key", "encrypt"),
@@ -178,6 +193,15 @@ mod tests {
         assert!(parsed(&["-V"]).unwrap().command == Command::Version);
         assert!(parsed(&["version"]).unwrap().command == Command::Version);
         assert!(parsed(&[]).unwrap().command == Command::Choose);
+    }
+
+    #[test]
+    fn takes_update_on_its_own() {
+        assert!(parsed(&["update"]).unwrap().command == Command::Update);
+        assert!(usage_error(parsed(&["update", "report.pdf"])).contains("update doesn't take a file"));
+        let yes = Options { yes: true, ..Options::default() };
+        assert!(matches!(check(Command::Update, &yes), Err(Error::Usage(_))));
+        assert!(check(Command::Update, &Options::default()).is_ok());
     }
 
     #[test]

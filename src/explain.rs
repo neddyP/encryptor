@@ -226,7 +226,19 @@ pub fn unknown_command(arg: &str, usage: &str) -> String {
     if arg.starts_with('-') {
         return format!("unknown option '{}'. These are the options:\n\n{usage}", safe(arg));
     }
-    format!("unknown command '{}'. The commands are encrypt and decrypt.\n\n{usage}", safe(arg))
+    format!("unknown command '{}'. The commands are encrypt, decrypt and update.\n\n{usage}", safe(arg))
+}
+
+/// `update` can't replace a copy installed some other way, such as one built
+/// from source.
+pub fn cant_update(exe: &Path) -> String {
+    format!(
+        "this copy of encryptor, {}, wasn't installed with npm or install.sh, so it can't update \
+         itself. If you built it from source, get the latest source and build it again. To install the \
+         latest release in /usr/local/bin instead:\n  \
+         curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh",
+        safe_path(exe)
+    )
 }
 
 pub fn no_file_given(command: &str) -> String {
@@ -428,7 +440,7 @@ pub fn unsupported_version(version: u8) -> String {
     if version > crate::VERSION {
         format!(
             "this file was made by a newer version of encryptor (file format {version}; this version \
-             reads up to {}).\nUpdate to the latest version, then try again:\n  npm install -g @neddyp/encryptor@latest",
+             reads up to {}).\nUpdate to the latest version, then try again:\n  encryptor update",
             crate::VERSION
         )
     } else {

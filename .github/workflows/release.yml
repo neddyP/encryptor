@@ -2,7 +2,7 @@ name: Release
 
 # Builds the binaries for every platform, packs @neddyp/encryptor and
 # publishes it to npm through trusted publishing, then attaches the binaries
-# to the version's GitHub release, where install-min.sh downloads them from.
+# to the version's GitHub release, where install.sh downloads them from.
 # What a run does is decided by .github/release-plan.sh:
 #
 #   Monthly (1st, 09:17 UTC)  if files that go into the package changed since
@@ -198,7 +198,7 @@ jobs:
           pattern: bin-*
           merge-multiple: true
           path: binaries
-      # install-min.sh downloads encryptor-<os>-<arch> from the latest release.
+      # install.sh downloads encryptor-<os>-<arch> from the latest release.
       # A release already made for the tag by hand keeps its title and notes.
       - name: Upload
         env:

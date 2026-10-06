@@ -24,6 +24,7 @@ mod session;
 mod stream;
 mod term;
 mod timestamps;
+mod update;
 mod wipe;
 
 use std::ffi::OsString;
@@ -48,6 +49,7 @@ USAGE:
     encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
     decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
     encryptor                      show the home screen, to encrypt or decrypt
+    encryptor update               update to the latest release
 
 `encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as encrypt
 and decrypt. Anything not given is asked for.
@@ -156,6 +158,7 @@ fn run(args: &[String]) -> Result<()> {
     let file = invocation.file.as_deref();
     match command {
         Command::Encrypt => encrypt::command(file, &invocation.options),
+        Command::Update => update::command(),
         _ => decrypt::command(file, &invocation.options),
     }
 }

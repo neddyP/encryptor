@@ -316,6 +316,20 @@ fn answers_to_its_names() {
 }
 
 #[test]
+fn updates_only_a_copy_it_knows_how_to_replace() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("update");
+    // Built here, it wasn't installed with npm or install.sh.
+    let run = dir.run(&["update"], "");
+    assert_eq!(run.code(), 1, "{}", run.stderr());
+    assert!(run.stderr().contains("can't update itself"), "{}", run.stderr());
+    assert_eq!(dir.run(&["update", "x.txt"], "").code(), 2);
+    assert_eq!(dir.run(&["update", "--yes"], "").code(), 2);
+}
+
+#[test]
 fn removes_the_key_and_runs_of_the_tool_from_shell_history() {
     if !runnable() {
         return;

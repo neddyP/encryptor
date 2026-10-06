@@ -20,7 +20,7 @@
 set -euo pipefail
 
 PACKAGE=@neddyp/encryptor
-PACKAGE_FILES=(src Cargo.toml Cargo.lock npm README.md LICENSE)
+PACKAGE_FILES=(src Cargo.toml Cargo.lock npm README.md LICENSE install.sh)
 
 cargo_version() { sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1; }
 npm_version() { node -p "require('./npm/package.json').version"; }
