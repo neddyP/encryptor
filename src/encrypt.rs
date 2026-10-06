@@ -153,8 +153,8 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             "Chunks",
             format!("{} of up to 64 KiB, each with its own {}-bit auth tag", sealed.chunks, stream::TAG_LEN * 8),
         ),
-        ("Input", format!("{}  {}", safe_path(&input), fmt_size(len as usize))),
-        ("Output", format!("{}  {}", safe_path(&output), fmt_size(len as usize + overhead))),
+        ("Input", format!("{}  {}", safe_path(&input), fmt_size(len))),
+        ("Output", format!("{}  {}", safe_path(&output), fmt_size(len + overhead as u64))),
         (
             "Overhead",
             format!(

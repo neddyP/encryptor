@@ -264,7 +264,7 @@ pub fn no_memory(len: u64) -> String {
     format!(
         "there isn't enough free memory: the file needs {} of RAM.\n\
          Close other programs and try again, or use a computer with more memory.",
-        fmt_size(len as usize)
+        fmt_size(len)
     )
 }
 
@@ -352,7 +352,7 @@ pub fn damaged_from(path: &Path, offset: u64) -> String {
          from there on the file was changed or cut short after it was encrypted.\nNothing was written. \
          Try another copy of it.",
         safe_path(path),
-        fmt_size(offset as usize)
+        fmt_size(offset)
     )
 }
 

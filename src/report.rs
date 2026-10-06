@@ -102,7 +102,7 @@ fn offer_to_save(text: &str, summary_base: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn fmt_size(bytes: usize) -> String {
+pub fn fmt_size(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} bytes");
     }
@@ -121,6 +121,12 @@ pub fn fmt_size(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_files_over_4_gib_on_32_bit_systems_too() {
+        assert_eq!(fmt_size(512), "512 bytes");
+        assert_eq!(fmt_size(5 << 30), "5368709120 bytes (5.0 GiB)");
+    }
 
     #[test]
     fn saved_copy_leaves_out_names_and_paths() {

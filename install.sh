@@ -1,14 +1,17 @@
 #!/bin/sh
 # Installs encryptor (the encryptor, encrypt and decrypt commands) from its
-# latest GitHub release into /usr/local/bin, with sudo unless run as root.
+# latest GitHub release into /usr/local/bin, using sudo if that needs it.
+# Where there's no sudo, it goes in ~/.local/bin instead, for you alone.
 # Linux on x64, x86, arm64 or arm, or macOS on x64 or arm64. Needs only curl
 # or wget.
 #
 #   curl -fsSL https://raw.githubusercontent.com/neddyp/encryptor/master/install.sh | sh
 #
 # or download this file and run `sh install.sh`. To update, run
-# `encryptor update`, which runs this script again. To uninstall:
+# `encryptor update`, which runs this script again with ENCRYPTOR_DIR set to
+# the folder its copy is in. To uninstall:
 #   cd /usr/local/bin && sudo rm encryptor encrypt decrypt
+# or in ~/.local/bin, the same without sudo.
 set -eu
 
 die() { echo "encryptor was not installed: $*" >&2; exit 1; }
@@ -27,9 +30,17 @@ case $(uname -m) in
 esac
 
 url=https://github.com/neddyp/encryptor/releases/latest/download/encryptor-$os-$arch
-dir=/usr/local/bin
+dir=${ENCRYPTOR_DIR:-/usr/local/bin}
 sudo=
-[ "$(id -u)" = 0 ] || sudo=sudo
+if ! { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; }; then
+  if command -v sudo >/dev/null; then
+    sudo=sudo
+  elif [ -z "${ENCRYPTOR_DIR:-}" ]; then
+    dir=$HOME/.local/bin
+  else
+    die "only root can change $dir, and there's no sudo here"
+  fi
+fi
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
@@ -52,3 +63,11 @@ $sudo mv -f "$dir/.encryptor.new" "$dir/encryptor"
 $sudo ln -sf encryptor "$dir/encrypt"
 $sudo ln -sf encryptor "$dir/decrypt"
 echo "encryptor installed in $dir: run encrypt, decrypt or encryptor"
+case ":$PATH:" in
+  *":$dir:"*) ;;
+  *)
+    echo "$dir isn't on your PATH yet. Add this line to your shell's startup file"
+    echo "(~/.bashrc, ~/.zshrc or ~/.profile), then open a new terminal:"
+    echo "  export PATH=\"$dir:\$PATH\""
+    ;;
+esac

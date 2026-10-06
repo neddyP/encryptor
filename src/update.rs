@@ -1,8 +1,9 @@
 //! `encryptor update`: replaces this copy with the latest release, the way it
 //! was installed. A copy installed with npm is updated with npm, into the same
-//! prefix. One in /usr/local/bin, where install.sh puts it, is updated by
-//! running that script, built into the program so it's the one this release
-//! shipped with rather than whatever is online. The program goes online only
+//! prefix. One where install.sh puts it, /usr/local/bin or for a user without
+//! sudo ~/.local/bin, is updated by running that script for the same folder.
+//! The script is built into the program, so it's the one this release shipped
+//! with rather than whatever is online. The program goes online only
 //! when asked to update: it never checks for a new version by itself.
 
 use std::ffi::{CString, OsString};
@@ -16,15 +17,17 @@ use crate::{explain, protect, timestamps};
 
 /// install.sh as of this release.
 const INSTALL_SCRIPT: &str = include_str!("../install.sh");
-/// Where install.sh installs the binary.
+/// Where install.sh installs the binary, and where it does without sudo,
+/// under the home folder.
 const INSTALL_DIR: &str = "/usr/local/bin";
+const USER_INSTALL_DIR: &str = ".local/bin";
 const PACKAGE: &str = "@neddyp/encryptor@latest";
 
 /// How this copy was installed, as told by where its binary is.
 #[derive(Debug, PartialEq)]
 enum Install {
-    /// With install.sh.
-    Script,
+    /// With install.sh, into this folder.
+    Script(PathBuf),
     /// With `npm install -g`, into this prefix.
     Npm(PathBuf),
     /// Some other way, such as built from source.
@@ -35,11 +38,12 @@ pub fn command() -> Result<()> {
     let exe = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|e| Error::Message(format!("couldn't tell where this copy of encryptor is: {e}")))?;
+    let home = std::env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
     let old = env!("CARGO_PKG_VERSION");
-    let (mut update, how) = match install_of(&exe) {
-        Install::Script => {
+    let (mut update, how) = match install_of(&exe, home.as_deref()) {
+        Install::Script(dir) => {
             let mut sh = Command::new("sh");
-            sh.arg("-c").arg(INSTALL_SCRIPT);
+            sh.arg("-c").arg(INSTALL_SCRIPT).env("ENCRYPTOR_DIR", dir);
             (sh, "install.sh")
         }
         Install::Npm(prefix) => (npm(&prefix), "npm"),
@@ -63,9 +67,13 @@ pub fn command() -> Result<()> {
     Ok(())
 }
 
-fn install_of(exe: &Path) -> Install {
-    if exe.parent() == Some(Path::new(INSTALL_DIR)) {
-        return Install::Script;
+/// How the binary at `exe` was installed, for a user whose home folder is
+/// `home`.
+fn install_of(exe: &Path, home: Option<&Path>) -> Install {
+    if let Some(dir) = exe.parent()
+        && (dir == Path::new(INSTALL_DIR) || home.is_some_and(|home| dir == home.join(USER_INSTALL_DIR)))
+    {
+        return Install::Script(dir.to_path_buf());
     }
     // npm installs global packages in <prefix>/lib/node_modules, and the
     // package keeps the binary in vendor/<platform>.
@@ -126,8 +134,12 @@ mod tests {
 
     #[test]
     fn tells_how_it_was_installed_from_where_it_is() {
-        let install = |path: &str| install_of(Path::new(path));
-        assert_eq!(install("/usr/local/bin/encryptor"), Install::Script);
+        let install = |path: &str| install_of(Path::new(path), Some(Path::new("/home/me")));
+        assert_eq!(install("/usr/local/bin/encryptor"), Install::Script("/usr/local/bin".into()));
+        assert_eq!(install("/home/me/.local/bin/encryptor"), Install::Script("/home/me/.local/bin".into()));
+        // Another user's, or without a home folder.
+        assert_eq!(install("/home/you/.local/bin/encryptor"), Install::Other);
+        assert_eq!(install_of(Path::new("/home/me/.local/bin/encryptor"), None), Install::Other);
         assert_eq!(
             install("/usr/local/lib/node_modules/@neddyp/encryptor/vendor/linux-x64/encryptor"),
             Install::Npm("/usr/local".into())
@@ -145,6 +157,7 @@ mod tests {
     #[test]
     fn carries_the_install_script() {
         assert!(INSTALL_SCRIPT.starts_with("#!/bin/sh"));
-        assert!(INSTALL_SCRIPT.contains(&format!("dir={INSTALL_DIR}\n")));
+        assert!(INSTALL_SCRIPT.contains(&format!("dir=${{ENCRYPTOR_DIR:-{INSTALL_DIR}}}\n")));
+        assert!(INSTALL_SCRIPT.contains(&format!("dir=$HOME/{USER_INSTALL_DIR}\n")));
     }
 }

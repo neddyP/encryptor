@@ -139,10 +139,13 @@ To read the script before running it, download it and run `sh install.sh`.
 
 It downloads the binary for your system from the latest
 [GitHub release](https://github.com/neddyp/encryptor/releases), over HTTPS
-only with curl, and installs it as `/usr/local/bin/encryptor`, owned by root,
-with `encrypt` and `decrypt` linked to it. Unless you run it as root, it uses
-sudo for that, which asks for your password. The binary is statically
-linked, so it runs on any distribution and needs nothing else installed.
+only with curl, and installs it as `/usr/local/bin/encryptor`, with `encrypt`
+and `decrypt` linked to it. If you can't write to `/usr/local/bin` yourself,
+as usual unless you're root, it uses sudo for that, which asks for your
+password. On a system without sudo, it installs into `~/.local/bin` instead,
+for you alone, and tells you how to add that folder to your `PATH` if it isn't
+there yet. The binary is statically linked, so it runs on any distribution
+and needs nothing else installed.
 
 Check it worked:
 
@@ -150,13 +153,16 @@ Check it worked:
 encryptor --help
 ```
 
-**Updating:** `encryptor update`, or run the install command again.
+**Updating:** `encryptor update`, which updates the copy in the folder it's
+in, or run the install command again.
 
 **Uninstalling:**
 
 ```
 cd /usr/local/bin && sudo rm encryptor encrypt decrypt
 ```
+
+or, if it went into `~/.local/bin`, the same there without `sudo`.
 
 ### With npm
 
@@ -266,8 +272,9 @@ encryptor update               update to the latest release
 ```
 
 `encryptor update` updates it the way it was installed. For a copy install.sh
-put in `/usr/local/bin`, it runs install.sh again, the copy built into the
-program rather than one fetched at update time. For the npm package, it runs
+put in `/usr/local/bin` or `~/.local/bin`, it runs install.sh again for that
+folder, the copy built into the program rather than one fetched at update
+time. For the npm package, it runs
 npm, into the same place, with sudo if that place belongs to root. It ends by
 saying which version you went from and to, or that you already have the
 latest. It's the only time encryptor goes online; it never checks for
