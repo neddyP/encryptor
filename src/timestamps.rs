@@ -140,11 +140,9 @@ fn set_back(path: &Path, follow: bool) {
     let Ok(when) = metadata.created().or_else(|_| metadata.modified()) else { return };
     let Ok(since) = when.duration_since(UNIX_EPOCH) else { return };
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else { return };
-    let Ok(secs) = libc::time_t::try_from(since.as_secs()) else { return };
-    let times = [
-        libc::timespec { tv_sec: secs, tv_nsec: libc::c_long::from(since.subsec_nanos()) },
-        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
-    ];
+    let Ok(secs) = i64::try_from(since.as_secs()) else { return };
+    let Some(read) = timespec((secs, i64::from(since.subsec_nanos()))) else { return };
+    let times = [read, libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }];
     let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
     // SAFETY: a valid C path and two timespecs, as utimensat takes.
     unsafe {
@@ -166,7 +164,7 @@ mod tests {
         let before = fs::metadata(&file).unwrap();
         // Read later, as running the program would.
         std::thread::sleep(Duration::from_millis(20));
-        let later = libc::timespec { tv_sec: before.mtime() + 3600, tv_nsec: 0 };
+        let later = timespec((before.mtime() + 3600, 0)).unwrap();
         let keep = libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT };
         let c = CString::new(file.as_os_str().as_bytes()).unwrap();
         // SAFETY: as in set_back.

@@ -1,8 +1,9 @@
 name: Release
 
 # Builds the binaries for every platform, packs @neddyp/encryptor and
-# publishes it to npm through trusted publishing. What a run does is decided
-# by .github/release-plan.sh:
+# publishes it to npm through trusted publishing, then attaches the binaries
+# to the version's GitHub release, where install-min.sh downloads them from.
+# What a run does is decided by .github/release-plan.sh:
 #
 #   Monthly (1st, 09:17 UTC)  if files that go into the package changed since
 #                             the last v* tag, bump the patch version, commit
@@ -56,7 +57,7 @@ jobs:
         run: git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/$RELEASE_REF"
 
   build-linux:
-    name: Build Linux (x64, arm64)
+    name: Build Linux (x64, arm64, x86, arm)
     needs: plan
     if: needs.plan.outputs.mode != 'skip'
     runs-on: ubuntu-latest
@@ -76,15 +77,18 @@ jobs:
       - uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
         with:
           tool: cross@0.2.5
-      # Static musl binaries run on any Linux distribution. The arm64 tests run
+      # Static musl binaries run on any Linux distribution. The arm tests run
       # under emulation inside cross's container, using the pinned images in
-      # Cross.toml. target/release holds build
-      # scripts compiled inside the previous target's container, which may not
-      # run in the next one, so it's cleared between targets.
+      # Cross.toml. x86 and arm are 32-bit, and only go to the GitHub release;
+      # arm is ARMv6 with hardware floating point, which ARMv7 and later run
+      # too. target/release holds build scripts compiled inside the previous
+      # target's container, which may not run in the next one, so it's
+      # cleared between targets.
       - name: Test and build
         run: |
           mkdir -p out
-          for pair in x86_64-unknown-linux-musl:linux-x64 aarch64-unknown-linux-musl:linux-arm64; do
+          for pair in x86_64-unknown-linux-musl:linux-x64 aarch64-unknown-linux-musl:linux-arm64 \
+              i686-unknown-linux-musl:linux-x86 arm-unknown-linux-musleabihf:linux-arm; do
             target=${pair%%:*} platform=${pair##*:}
             rm -rf target/release
             cross test --release --locked --target "$target"
@@ -180,3 +184,28 @@ jobs:
       - name: Publish (dry run)
         if: needs.plan.outputs.mode == 'dry-run'
         run: npm publish ./neddyp-encryptor-*.tgz --provenance=false --dry-run
+
+  github-release:
+    name: Attach binaries to the GitHub release
+    needs: [plan, publish]
+    if: needs.plan.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload to it
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: binaries
+      # install-min.sh downloads encryptor-<os>-<arch> from the latest release.
+      # A release already made for the tag by hand keeps its title and notes.
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.ref }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes ""
+          gh release upload "$TAG" binaries/encryptor-* --clobber
