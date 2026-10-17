@@ -725,13 +725,7 @@ fn quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("encryptor-explain-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::testing::Scratch;
 
     fn os_error(code: i32) -> io::Error {
         io::Error::from_raw_os_error(code)
@@ -757,7 +751,7 @@ mod tests {
 
     #[test]
     fn suggests_the_file_that_was_probably_meant() {
-        let dir = scratch("missing");
+        let dir = Scratch::new("explain-missing");
         fs::write(dir.join("report.pdf.enc"), b"x").unwrap();
         fs::write(dir.join("Notes.txt"), b"x").unwrap();
         let gone = os_error(libc::ENOENT);
@@ -772,12 +766,11 @@ mod tests {
         assert!(view.contains("the encrypted file?\n  encryptor view ") && view.ends_with("report.pdf.enc"), "{view}");
         let neither = missing("encrypt", &dir.join("other"), &gone);
         assert!(neither.contains("Check the spelling"), "{neither}");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn points_links_to_the_real_file() {
-        let dir = scratch("link");
+        let dir = Scratch::new("explain-link");
         fs::write(dir.join("real.txt"), b"x").unwrap();
         std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link")).unwrap();
         std::os::unix::fs::symlink(dir.join("gone"), dir.join("broken")).unwrap();
@@ -785,7 +778,6 @@ mod tests {
 
         assert!(symlink("encrypt", &dir.join("link")).ends_with(&format!("encrypt {}", real.display())));
         assert!(symlink("encrypt", &dir.join("broken")).contains("which doesn't exist"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -826,14 +818,13 @@ mod tests {
 
     #[test]
     fn suggests_commands_with_the_names_given() {
-        let dir = scratch("commands");
+        let dir = Scratch::new("explain-commands");
         let file = dir.join("data.enc");
         fs::write(&file, b"x").unwrap();
         let named = unknown_command(file.to_str().unwrap(), "USAGE");
         assert!(named.contains("is a file, not a command") && named.contains("decrypt "), "{named}");
         assert!(unknown_command("--force", "USAGE").starts_with("unknown option '--force'. These are the options"));
         assert!(unknown_command("crypt", "USAGE").starts_with("unknown command 'crypt'"));
-        fs::remove_dir_all(&dir).unwrap();
 
         assert!(decrypt_folder(Path::new("My Files/")).ends_with("for f in 'My Files'/*.enc; do decrypt \"$f\"; done"));
         let several = decrypt_one_at_a_time(&["a.enc".into(), "b c.enc".into()]);
@@ -877,11 +868,10 @@ mod tests {
         assert!(no_file_given("view").ends_with("  encryptor view report.pdf.enc"));
         assert!(no_file_given("decrypt").ends_with("  decrypt report.pdf.enc"));
         assert!(no_file_given("encrypt").ends_with("  encrypt report.pdf"));
-        let dir = scratch("view-link");
+        let dir = Scratch::new("explain-view-link");
         fs::write(dir.join("real.enc"), b"x").unwrap();
         std::os::unix::fs::symlink(dir.join("real.enc"), dir.join("link")).unwrap();
         assert!(symlink("view", &dir.join("link")).contains("\n  encryptor view "));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

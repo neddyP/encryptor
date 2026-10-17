@@ -153,12 +153,11 @@ fn set_back(path: &Path, follow: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Scratch;
 
     #[test]
     fn sets_the_last_read_time_back_and_keeps_the_modified_time() {
-        let dir = std::env::temp_dir().join(format!("encryptor-timestamps-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("timestamps-set-back");
         let file = dir.join("encryptor");
         fs::write(&file, b"x").unwrap();
         let before = fs::metadata(&file).unwrap();
@@ -177,14 +176,11 @@ mod tests {
         assert_eq!(after.accessed().unwrap(), created, "back to when it was made");
         assert_eq!(after.mtime(), before.mtime());
         assert_eq!(after.mtime_nsec(), before.mtime_nsec());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn leaves_a_file_not_read_since_alone() {
-        let dir = std::env::temp_dir().join(format!("encryptor-unread-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("timestamps-unread");
         let file = dir.join("encryptor");
         fs::write(&file, b"x").unwrap();
         let before = fs::metadata(&file).unwrap();
@@ -193,35 +189,29 @@ mod tests {
         let after = fs::metadata(&file).unwrap();
         assert_eq!((after.ctime(), after.ctime_nsec()), (before.ctime(), before.ctime_nsec()), "change time untouched");
         assert_eq!(after.accessed().unwrap(), before.accessed().unwrap());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn sets_a_folders_modified_time_back_when_dropped() {
-        let dir = std::env::temp_dir().join(format!("encryptor-dirtimes-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("timestamps-folder");
         let before = fs::metadata(&dir).unwrap();
         std::thread::sleep(Duration::from_millis(1100));
         {
-            let _times = DirTimes::capture([dir.clone(), dir.clone(), PathBuf::new()]);
+            let _times = DirTimes::capture([dir.to_path_buf(), dir.to_path_buf(), PathBuf::new()]);
             // Writing a file moves the folder's modified time forward.
             fs::write(dir.join("report.pdf.enc"), b"x").unwrap();
             assert!(fs::metadata(&dir).unwrap().mtime() > before.mtime());
         }
         let after = fs::metadata(&dir).unwrap();
         assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()), "set back on drop");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn knows_its_own_package() {
-        let dir = std::env::temp_dir().join(format!("encryptor-package-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("timestamps-package");
         fs::write(dir.join("package.json"), b"{\n  \"name\": \"@neddyp/encryptor\",\n}").unwrap();
         assert!(is_package(&dir));
         fs::write(dir.join("package.json"), b"{\n  \"name\": \"something-else\",\n}").unwrap();
         assert!(!is_package(&dir));
-        let _ = fs::remove_dir_all(&dir);
     }
 }

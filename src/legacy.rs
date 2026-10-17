@@ -108,10 +108,10 @@ mod tests {
 
     #[test]
     fn carries_metadata_inside_the_encryption() {
-        let path = std::env::temp_dir().join(format!("encryptor-carry-{}", std::process::id()));
+        let dir = crate::testing::Scratch::new("legacy-carry");
+        let path = dir.join("file");
         fs::write(&path, b"contents").unwrap();
         let metadata = Metadata::capture(&File::open(&path).unwrap()).unwrap();
-        fs::remove_file(&path).unwrap();
 
         let blob = version_2(&key(8), &metadata, b"contents");
         assert!(!blob.windows(8).any(|w| w == b"contents"), "contents visible");

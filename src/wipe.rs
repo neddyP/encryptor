@@ -213,17 +213,11 @@ fn scrambled_name(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("encryptor-wipe-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::testing::Scratch;
 
     #[test]
     fn destroy_zeroes_contents_and_removes_the_name() {
-        let dir = scratch("destroy");
+        let dir = Scratch::new("wipe-destroy");
         let path = dir.join("secret.txt");
         fs::write(&path, b"top secret").unwrap();
         let original = Original::open(&path, true).unwrap();
@@ -237,24 +231,22 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(fs::read(&witness).unwrap(), vec![0u8; 10]);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "only the witness is left");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn refuses_to_overwrite_a_file_with_other_names() {
-        let dir = scratch("links");
+        let dir = Scratch::new("wipe-links");
         let path = dir.join("secret.txt");
         fs::write(&path, b"top secret").unwrap();
         fs::hard_link(&path, dir.join("other")).unwrap();
         let refused = Original::open(&path, true).err().unwrap().to_string();
         assert!(refused.contains("has 1 other name"), "{refused}");
         assert!(Original::open(&path, false).is_ok(), "it can still be read to keep");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn overwrites_a_read_only_file_and_leaves_its_permissions() {
-        let dir = scratch("read-only");
+        let dir = Scratch::new("wipe-read-only");
         let path = dir.join("secret.txt");
         fs::write(&path, b"top secret").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
@@ -267,12 +259,11 @@ mod tests {
         let status = original.destroy(&path).unwrap();
         assert!(status.starts_with("overwritten with zeros"), "{status}");
         assert_eq!(fs::read(&witness).unwrap(), vec![0u8; 10]);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn rewrites_in_place_keeping_what_was_appended() {
-        let dir = scratch("rewrite");
+        let dir = Scratch::new("wipe-rewrite");
         let path = dir.join("history");
         fs::write(&path, b"keep\nremove\nkeep too\n").unwrap();
         let file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
@@ -280,22 +271,20 @@ mod tests {
         OpenOptions::new().append(true).open(&path).unwrap().write_all(b"new\n").unwrap();
         rewrite(&file, 21, b"keep\nkeep too\n").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"keep\nkeep too\nnew\n");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn refuses_to_open_a_symlink() {
-        let dir = scratch("nofollow");
+        let dir = Scratch::new("wipe-nofollow");
         fs::write(dir.join("target"), b"x").unwrap();
         std::os::unix::fs::symlink(dir.join("target"), dir.join("link")).unwrap();
         assert!(Original::open(&dir.join("link"), false).is_err());
         assert!(Original::open(&dir.join("link"), true).is_err());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn swapping_the_name_for_a_link_protects_the_target() {
-        let dir = scratch("swap");
+        let dir = Scratch::new("wipe-swap");
         let path = dir.join("secret.txt");
         let victim = dir.join("victim");
         fs::write(&path, b"secret").unwrap();
@@ -309,12 +298,11 @@ mod tests {
         assert!(status.starts_with("WARNING: not deleted"), "{status}");
         assert_eq!(fs::read(&victim).unwrap(), b"precious");
         assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn shred_zeroes_then_removes() {
-        let dir = scratch("shred");
+        let dir = Scratch::new("wipe-shred");
         let path = dir.join("partial");
         fs::write(&path, b"plaintext").unwrap();
         let witness = dir.join("witness");
@@ -322,6 +310,5 @@ mod tests {
         shred(&path).unwrap();
         assert!(!path.exists());
         assert_eq!(fs::read(&witness).unwrap(), vec![0u8; 9]);
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

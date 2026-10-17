@@ -331,10 +331,11 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::testing::Scratch;
 
     #[test]
     fn includes_terminal_window_history_on_macos() {
-        let home = scratch("sessions");
+        let home = Scratch::new("history-sessions");
         let bash = home.join(".bash_sessions");
         let zdot = home.join("zdot");
         let zsh = zdot.join(".zsh_sessions");
@@ -347,7 +348,7 @@ mod tests {
         fs::write(zsh.join("B.history"), b"").unwrap();
         fs::write(home.join(".zsh_sessions"), b"").unwrap();
 
-        let files = history_files(Some(home.clone()), None, Some(zdot), None);
+        let files = history_files(Some(home.to_path_buf()), None, Some(zdot), None);
         assert!(files.contains(&bash.join("A.history")));
         assert!(files.contains(&bash.join("A.historynew")));
         assert!(files.contains(&zsh.join("B.history")), "zsh's folder follows ZDOTDIR");
@@ -372,19 +373,13 @@ mod tests {
 
     #[test]
     fn cleans_a_terminal_window_history_file() {
-        let dir = scratch("window").join(".bash_sessions");
+        let window = Scratch::new("history-window");
+        let dir = window.join(".bash_sessions");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("A.history");
         fs::write(&path, b"ls\nencrypt report.pdf\ncd ~\n").unwrap();
         assert_eq!(clean_file(&path, None).unwrap().runs, 1);
         assert_eq!(fs::read(&path).unwrap(), b"ls\ncd ~\n");
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("encryptor-history-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -447,7 +442,7 @@ mod tests {
 
     #[test]
     fn removes_whole_entries() {
-        let dir = scratch("clean");
+        let dir = Scratch::new("history-clean");
         let key = [0xabu8; 32];
         let upper = hex::encode(key).to_uppercase();
         let path = dir.join(".bash_history");
@@ -462,18 +457,16 @@ mod tests {
 
         assert_eq!(clean_file(&path, None).unwrap().any(), false);
         assert_eq!(clean_file(&dir.join("missing"), None).unwrap().any(), false);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn cleans_fish_history() {
-        let dir = scratch("fish");
+        let dir = Scratch::new("history-fish");
         let path = dir.join("fish_history");
         fs::write(&path, "- cmd: ls\n  when: 1\n- cmd: decrypt a.enc\n  when: 2\n  paths:\n    - a.enc\n- cmd: pwd\n  when: 3\n")
             .unwrap();
         let removed = clean_file(&path, None).unwrap();
         assert_eq!((removed.key, removed.runs), (0, 1));
         assert_eq!(fs::read_to_string(&path).unwrap(), "- cmd: ls\n  when: 1\n- cmd: pwd\n  when: 3\n");
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -408,6 +408,7 @@ pub fn clean_path(raw: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Scratch;
 
     #[test]
     fn reads_whether_filevault_is_off() {
@@ -416,13 +417,6 @@ mod tests {
         assert_eq!(filevault_status_off("Encryption in progress: Percent completed = 40.2\n"), Some(true));
         assert_eq!(filevault_status_off("Decryption in progress: Percent completed = 10\n"), Some(true));
         assert_eq!(filevault_status_off(""), None, "unknown when it says nothing useful");
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("encryptor-files-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -434,7 +428,7 @@ mod tests {
 
     #[test]
     fn puts_a_finished_file_in_place() {
-        let dir = scratch("finish");
+        let dir = Scratch::new("files-finish");
         let path = dir.join("out");
         let mut part = PartFile::create(&path, false).unwrap_or_else(|_| panic!("create"));
         part.write_all(b"new").unwrap();
@@ -442,12 +436,11 @@ mod tests {
         assert!(matches!(part.finish(), Ok(Replaced::Nothing)));
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "the temporary file is gone");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn shreds_the_file_it_replaces() {
-        let dir = scratch("replace");
+        let dir = Scratch::new("files-replace");
         let path = dir.join("out");
         fs::write(&path, b"old plaintext").unwrap();
         // Opened before the replacement, this still sees the old file.
@@ -461,12 +454,11 @@ mod tests {
         (&old).read_to_end(&mut left).unwrap();
         assert_eq!(left, vec![0; 13], "the old contents were overwritten");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn leaves_other_links_to_a_replaced_file_alone() {
-        let dir = scratch("linked");
+        let dir = Scratch::new("files-linked");
         let path = dir.join("out");
         fs::write(&path, b"shared").unwrap();
         fs::hard_link(&path, dir.join("backup")).unwrap();
@@ -476,12 +468,11 @@ mod tests {
         assert!(matches!(part.finish(), Ok(Replaced::Unlinked)));
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(fs::read(dir.join("backup")).unwrap(), b"shared");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn shreds_an_unfinished_file() {
-        let dir = scratch("unfinished");
+        let dir = Scratch::new("files-unfinished");
         let path = dir.join("out");
         let mut part = PartFile::create(&path, false).unwrap_or_else(|_| panic!("create"));
         part.write_all(b"partial plaintext").unwrap();
@@ -491,7 +482,6 @@ mod tests {
         drop(part);
         assert!(!tmp.exists() && !path.exists());
         assert_eq!(fs::read(&witness).unwrap(), vec![0; 17]);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Only a real disk drops pages; tmpfs holds files in the cache itself.

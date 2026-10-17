@@ -505,8 +505,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn sees_what_a_process_writes_to() {
-        let dir = std::env::temp_dir().join(format!("encryptor-recording-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Scratch::new("recording");
         let log = dir.join("session.log");
         let sleep = |stdout: Stdio| {
             Command::new("sleep").arg("10").stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null()).spawn()
@@ -523,7 +522,6 @@ mod tests {
             child.kill().unwrap();
             child.wait().unwrap();
         }
-        std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(logging_writes, [format!("writing to {}", log.display())]);
         assert!(logging_records);

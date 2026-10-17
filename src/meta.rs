@@ -460,8 +460,7 @@ mod tests {
 
     #[test]
     fn restores_what_it_captured() {
-        let dir = std::env::temp_dir().join(format!("encryptor-meta-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Scratch::new("meta-restore");
         let (from, to) = (dir.join("from"), dir.join("to"));
         std::fs::write(&from, b"x").unwrap();
         std::fs::write(&to, b"x").unwrap();
@@ -477,7 +476,6 @@ mod tests {
         let target = File::open(&to).unwrap();
         let status = captured.restore(&target);
         let after = Metadata::capture(&target).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
 
         assert!(status.starts_with("restored "), "{status}");
         assert_eq!(after.mode, Some(0o751));
@@ -496,7 +494,8 @@ mod tests {
         if unsafe { libc::geteuid() } == 0 {
             return; // root can give the file away, so there's nothing to drop
         }
-        let path = std::env::temp_dir().join(format!("encryptor-setuid-{}", std::process::id()));
+        let dir = crate::testing::Scratch::new("meta-setuid");
+        let path = dir.join("file");
         std::fs::write(&path, b"x").unwrap();
         let file = File::open(&path).unwrap();
         let me = file.metadata().unwrap();
@@ -504,7 +503,6 @@ mod tests {
 
         let status = meta.restore(&file);
         let mode = file.metadata().unwrap().mode() & MODE_BITS;
-        std::fs::remove_file(&path).unwrap();
 
         assert_eq!(mode, 0o755);
         assert!(status.contains("owner") && status.contains("permissions 4755 (set to 755)"), "{status}");

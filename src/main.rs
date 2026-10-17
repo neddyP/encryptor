@@ -24,6 +24,8 @@ mod report;
 mod session;
 mod stream;
 mod term;
+#[cfg(test)]
+mod testing;
 mod timestamps;
 mod update;
 mod view;

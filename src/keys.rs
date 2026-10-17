@@ -352,6 +352,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::testing::Scratch;
 
     #[test]
     fn parses_hex_keys() {
@@ -372,8 +373,7 @@ mod tests {
 
     #[test]
     fn reads_key_files() {
-        let dir = std::env::temp_dir().join(format!("encryptor-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("keys-files");
         let good = dir.join("good.key");
         let bad = dir.join("bad.key");
         fs::write(&good, [9u8; KEY_LEN]).unwrap();
@@ -385,13 +385,11 @@ mod tests {
         let missing = dir.join("missing.key");
         assert!(parse(missing.to_str().unwrap()).unwrap_err().starts_with("there's no key file at"));
         assert!(parse(dir.to_str().unwrap()).unwrap_err().contains("is a folder, not a key file"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn reads_keys_written_out_as_hex() {
-        let dir = std::env::temp_dir().join(format!("encryptor-hexkey-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("keys-hex");
         let key = [0xc3u8; KEY_LEN];
         for (name, contents) in [
             ("plain.txt", hex::encode(key)),
@@ -404,7 +402,6 @@ mod tests {
         fs::write(dir.join("short.txt"), &hex::encode(key)[1..]).unwrap();
         assert!(matches!(read_key_file(&dir.join("short.txt")), Err(Error::KeyOrData(_))));
         assert!(matches!(read_key_file(&dir.join("missing")), Err(Error::File(_))));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

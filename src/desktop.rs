@@ -161,6 +161,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::testing::Scratch;
 
     #[test]
     fn makes_uris_as_glib_does() {
@@ -188,8 +189,7 @@ mod tests {
 
     #[test]
     fn forgets_thumbnails_and_recent_entries() {
-        let dir = std::env::temp_dir().join(format!("encryptor-desktop-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Scratch::new("desktop");
         let (cache, data) = (dir.join("cache"), dir.join("data"));
         let path = dir.join("photo.jpg");
         let uri = file_uri(&path);
@@ -209,6 +209,5 @@ mod tests {
         assert_eq!(fs::read_to_string(&xbel).unwrap(), "<xbel>\n</xbel>\n");
         assert_eq!(remove_recent(&data.join("missing.xbel"), &uris(&path)).unwrap(), 0);
         assert_eq!(plural(2, "recently used entry"), "2 recently used entries");
-        fs::remove_dir_all(&dir).unwrap();
     }
 }
