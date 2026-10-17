@@ -77,8 +77,10 @@ pub fn header() {
         return;
     }
     let color = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+    // The classic 80 columns if the terminal doesn't say.
+    let cols = term::size(libc::STDERR_FILENO).map_or(80, |(_, cols)| cols);
     let text = match header_lock().as_ref() {
-        Some(header) => render(&header.version, &header.notes, columns(), color),
+        Some(header) => render(&header.version, &header.notes, cols, color),
         None => return,
     };
     let _ = to_terminal(&format!("\x1b[H\x1b[2J{text}"));
@@ -161,18 +163,6 @@ fn render(version: &str, notes: &[String], cols: usize, color: bool) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Columns of the window, or the classic 80 if unknown.
-fn columns() -> usize {
-    // SAFETY: winsize is plain data, filled in by the ioctl.
-    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-    // SAFETY: asks the terminal on standard error for its size.
-    let known = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
-    match known && size.ws_col > 0 {
-        true => usize::from(size.ws_col),
-        false => 80,
-    }
 }
 
 /// Writes straight to the terminal, after anything waiting in standard output,

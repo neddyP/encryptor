@@ -51,7 +51,8 @@ pub fn show(usage: &str, version: &str) -> Result<Choice> {
     loop {
         protect::check()?;
         // Redrawn when scrolled, and when the window changes size.
-        let (rows, cols) = terminal_size();
+        // The classic 24 by 80 if the terminal doesn't say.
+        let (rows, cols) = term::size(libc::STDOUT_FILENO).unwrap_or((24, 80));
         if shown != Some((top, rows, cols)) {
             write(&frame(&lines, top, rows, cols, color))?;
             shown = Some((top, rows, cols));
@@ -165,18 +166,6 @@ fn read_key(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Opt
         term::Key::Byte(b'G') | term::Key::End => Key::End,
         _ => Key::Other,
     }))
-}
-
-/// Rows and columns of the terminal, or the classic 24 by 80 if unknown.
-fn terminal_size() -> (usize, usize) {
-    // SAFETY: winsize is plain data, filled in by the ioctl.
-    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-    // SAFETY: asks the terminal on standard output for its size.
-    let known = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
-    match known && size.ws_row > 0 && size.ws_col > 0 {
-        true => (usize::from(size.ws_row), usize::from(size.ws_col)),
-        false => (24, 80),
-    }
 }
 
 fn write(text: &str) -> Result<()> {
