@@ -1,9 +1,9 @@
 //! The name in large letters with a padlock, drawn on the home screen and at
-//! the top of every run's screen. In a UTF-8 terminal 80 columns wide or more,
+//! the top of every run's screen. In a UTF-8 terminal 81 columns wide or more,
 //! the name is in block letters with the padlock standing in for its O.
 //! Elsewhere, and in narrower windows, it's in ASCII beside the padlock, and in
-//! the narrowest it's left out. The name shades from cyan to blue down the
-//! rows, and the padlock is gold.
+//! the narrowest it's left out. It shades from light cyan to blue down the
+//! rows, padlock and all.
 
 /// The name's first seven letters in block letters, ENCRYPT.
 const ENCRYPT: [&str; 6] = [
@@ -38,9 +38,8 @@ const ASCII_LOCK: usize = 13;
 /// so the first column is left out, the same for every row.
 const LOCK_AS_O: usize = 10;
 
-/// Colours for the name's rows, top to bottom: from light cyan to blue.
+/// Colours for the rows, top to bottom: from light cyan to blue.
 const GRADIENT: [u8; 6] = [87, 51, 45, 39, 33, 27];
-const GOLD: u8 = 220;
 
 /// A part of the art, coloured as one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,11 +101,12 @@ pub fn rows(cols: usize, utf8: bool) -> Vec<Row> {
             vec![(Part::Lock, lock.to_string()), (Part::Name, name.to_string())]
         })
         .collect();
-    // The padlock where the O was, with its shackle rising above the letters.
+    // The padlock where the O was, with its shackle rising above the letters
+    // and a space before the R.
     let lock = |i: usize| format!("{:<LOCK_AS_O$}", split(i).0.get(1..).unwrap_or_default().trim_end());
     let block: Vec<Row> = (0..ASCII.len())
         .map(|i| match i.checked_sub(1) {
-            Some(n) => vec![(Part::Name, ENCRYPT[n].to_string()), (Part::Lock, lock(i)), (Part::Name, R[n].to_string())],
+            Some(n) => vec![(Part::Name, ENCRYPT[n].to_string()), (Part::Lock, lock(i)), (Part::Name, format!(" {}", R[n]))],
             None => vec![(Part::Name, " ".repeat(ENCRYPT[0].chars().count())), (Part::Lock, lock(i))],
         })
         .collect();
@@ -123,22 +123,15 @@ pub fn width(row: &Row) -> usize {
 }
 
 /// Row `i` of `count`, ready to print in `colors`, with the colours reset
-/// after it.
+/// after it. The whole row is one shade of the gradient.
 pub fn paint(row: &Row, i: usize, count: usize, colors: Colors) -> String {
-    let shade = GRADIENT[i * (GRADIENT.len() - 1) / count.saturating_sub(1).max(1)];
-    let mut out = String::new();
-    for (part, text) in row {
-        let style = match (colors, part) {
-            (Colors::None, _) => "1".to_string(),
-            (Colors::Basic, Part::Lock) => "1;33".into(),
-            (Colors::Basic, Part::Name) => "1;36".into(),
-            (Colors::Rich, Part::Lock) => format!("1;38;5;{GOLD}"),
-            (Colors::Rich, Part::Name) => format!("1;38;5;{shade}"),
-        };
-        out.push_str(&format!("\x1b[{style}m{text}"));
-    }
-    out.push_str("\x1b[0m");
-    out
+    let style = match colors {
+        Colors::None => "1".to_string(),
+        Colors::Basic => "1;36".into(),
+        Colors::Rich => format!("1;38;5;{}", GRADIENT[i * (GRADIENT.len() - 1) / count.saturating_sub(1).max(1)]),
+    };
+    let text: String = row.iter().map(|(_, text)| text.as_str()).collect();
+    format!("\x1b[{style}m{text}\x1b[0m")
 }
 
 #[cfg(test)]
@@ -159,7 +152,7 @@ mod tests {
 
     #[test]
     fn puts_the_padlock_where_the_o_was_as_it_is() {
-        let block = rows(78, true);
+        let block = rows(79, true);
         for (i, row) in block.iter().enumerate() {
             let lock = row.iter().find(|(part, _)| *part == Part::Lock).map(|(_, text)| text.trim_end()).unwrap();
             let ascii = ASCII[i].chars().take(ASCII_LOCK).collect::<String>();
@@ -169,13 +162,14 @@ mod tests {
 
     #[test]
     fn uses_the_widest_layout_that_fits() {
-        let block = rows(78, true);
-        assert_eq!(block.iter().map(width).max(), Some(78));
+        let block = rows(79, true);
+        assert_eq!(block.iter().map(width).max(), Some(79));
         assert_eq!(text(&block)[0].trim_start(), ".----.", "the shackle rises above the letters");
-        assert!(text(&block)[3].ends_with("   ██║   .'-'--'-'.██████╔╝"), "{:?}", text(&block)[3]);
+        assert!(text(&block)[3].ends_with("   ██║   .'-'--'-'. ██████╔╝"), "{:?}", text(&block)[3]);
+        assert!(text(&block)[6].ends_with("'--------' ╚═╝  ╚═╝"), "a space before the R on every row");
         assert_eq!(block[3][1], (Part::Lock, ".'-'--'-'.".to_string()));
 
-        let ascii = rows(77, true);
+        let ascii = rows(78, true);
         assert_eq!(ascii.len(), 7);
         assert!(text(&ascii)[2].contains("___ _ __   ___"));
         assert!(text(&rows(200, false)).iter().all(|row| row.is_ascii()), "ASCII without UTF-8, however wide");
@@ -183,14 +177,15 @@ mod tests {
     }
 
     #[test]
-    fn colours_the_padlock_gold_and_shades_the_name() {
-        let rows = rows(78, true);
+    fn shades_the_padlock_with_the_name() {
+        let rows = rows(79, true);
         let second = paint(&rows[1], 1, rows.len(), Colors::Rich);
         let bottom = paint(&rows[6], 6, rows.len(), Colors::Rich);
-        assert!(second.starts_with("\x1b[1;38;5;87m███████╗"), "{second:?}");
-        assert!(second.contains("\x1b[1;38;5;220m / .--. \\"), "{second:?}");
-        assert!(bottom.contains("\x1b[1;38;5;27m") && bottom.ends_with("\x1b[0m"), "{bottom:?}");
-        assert_eq!(paint(&rows[1], 1, rows.len(), Colors::None).matches("\x1b[1m").count(), 3, "bold only");
-        assert!(paint(&rows[1], 1, rows.len(), Colors::Basic).contains("\x1b[1;33m"));
+        assert!(second.starts_with("\x1b[1;38;5;87m███████╗") && second.contains("╗ / .--. \\  ██████╗"), "{second:?}");
+        assert_eq!(second.matches("\x1b[").count(), 2, "one shade for the row, then the reset");
+        assert!(bottom.starts_with("\x1b[1;38;5;27m") && bottom.ends_with("\x1b[0m"), "{bottom:?}");
+        let whole: String = rows[1].iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(paint(&rows[1], 1, rows.len(), Colors::None), format!("\x1b[1m{whole}\x1b[0m"), "bold only");
+        assert!(paint(&rows[1], 1, rows.len(), Colors::Basic).starts_with("\x1b[1;36m"));
     }
 }

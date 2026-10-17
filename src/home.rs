@@ -253,8 +253,10 @@ mod tests {
         assert!(screen[29].starts_with(" e encrypt   d decrypt   v view   q quit"));
         assert!(!screen[29].contains("of"), "everything fits, so no position");
 
-        let block = content("", "encryptor 9.9.9", 80, art::Look { utf8: true, ..ASCII });
-        assert!(visible(&block[3].text)[0].contains("██║   .'-'--'-'.██████╔╝"), "the padlock in place of the O");
+        let utf8 = art::Look { utf8: true, ..ASCII };
+        let block = content("", "encryptor 9.9.9", 81, utf8);
+        assert!(visible(&block[3].text)[0].contains("██║   .'-'--'-'. ██████╔╝"), "the padlock in place of the O");
+        assert!(visible(&content("", "v", 80, utf8)[2].text)[0].contains("___ _ __   ___"), "ASCII at 80 columns");
         assert!(content("", "v", 40, ASCII)[0].text.contains('v'), "no art in a narrow window");
     }
 
