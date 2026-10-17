@@ -9,18 +9,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::term::{self, RawMode};
-use crate::{protect, session};
-
-/// A padlock beside the name, as figlet's standard font draws it.
-pub const ART: [&str; 7] = [
-    r"   .----.",
-    r"  / .--. \                                      _",
-    r"  | |  | |      ___ _ __   ___ _ __ _   _ _ __ | |_ ___  _ __",
-    r" .'-'--'-'.    / _ \ '_ \ / __| '__| | | | '_ \| __/ _ \| '__|",
-    r" |  (  )  |   |  __/ | | | (__| |  | |_| | |_) | || (_) | |",
-    r" |   ||   |    \___|_| |_|\___|_|   \__, | .__/ \__\___/|_|",
-    r" '--------'                         |___/|_|",
-];
+use crate::{art, protect, session};
 
 const KEYS: &str = " e encrypt   d decrypt   v view   q quit";
 
@@ -41,20 +30,26 @@ pub fn available() -> bool {
 
 /// Shows the home screen until a key chooses what to do.
 pub fn show(usage: &str, version: &str) -> Result<Choice> {
-    let color = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
-    let lines = content(usage, version);
+    let look = art::Look::detect();
     let _raw = RawMode::enter(libc::STDIN_FILENO)?;
     let _screen = Screen::enter()?;
 
+    let mut lines = Vec::new();
+    let mut laid_out = None;
     let mut top = 0;
     let mut shown = None;
     loop {
         protect::check()?;
-        // Redrawn when scrolled, and when the window changes size.
-        // The classic 24 by 80 if the terminal doesn't say.
+        // Redrawn when scrolled, and when the window changes size, and laid
+        // out again when it changes width, which the art depends on. The
+        // classic 24 by 80 if the terminal doesn't say.
         let (rows, cols) = term::size(libc::STDOUT_FILENO).unwrap_or((24, 80));
+        if laid_out != Some(cols) {
+            lines = content(usage, version, cols, look);
+            laid_out = Some(cols);
+        }
         if shown != Some((top, rows, cols)) {
-            write(&frame(&lines, top, rows, cols, color))?;
+            write(&frame(&lines, top, rows, cols))?;
             shown = Some((top, rows, cols));
         }
         let Some(key) = read_key(&mut |wait| term::poll_byte(libc::STDIN_FILENO, wait))? else { continue };
@@ -78,6 +73,7 @@ pub fn show(usage: &str, version: &str) -> Result<Choice> {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Style {
+    /// Already coloured, and laid out for the width.
     Art,
     Title,
     Plain,
@@ -88,11 +84,16 @@ struct Line {
     style: Style,
 }
 
-/// Everything on the home screen, top to bottom, with a margin on the left.
-fn content(usage: &str, version: &str) -> Vec<Line> {
+/// Everything on the home screen, top to bottom, with a margin on the left,
+/// for a window `cols` wide that can draw as `look` says.
+fn content(usage: &str, version: &str, cols: usize, look: art::Look) -> Vec<Line> {
     let line = |text: &str, style| Line { text: format!("  {text}"), style };
-    let mut lines: Vec<Line> = ART.iter().map(|art| line(art, Style::Art)).collect();
-    lines.push(line("", Style::Plain));
+    let art = art::rows(cols.saturating_sub(2), look.utf8);
+    let mut lines: Vec<Line> =
+        art.iter().enumerate().map(|(i, row)| line(&art::paint(row, i, art.len(), look.colors), Style::Art)).collect();
+    if !art.is_empty() {
+        lines.push(line("", Style::Plain));
+    }
     lines.push(line(version, Style::Title));
     lines.push(line("", Style::Plain));
     lines.extend(usage.lines().map(|text| line(text, Style::Plain)));
@@ -107,14 +108,15 @@ fn body_rows(rows: usize) -> usize {
 /// The whole screen as one write: the content from line `top`, cut to the
 /// width, then the key bar on the last row, with where the view is when not
 /// everything fits.
-fn frame(lines: &[Line], top: usize, rows: usize, cols: usize, color: bool) -> String {
+fn frame(lines: &[Line], top: usize, rows: usize, cols: usize) -> String {
     let body = body_rows(rows);
     let mut out = String::from("\x1b[H");
     for line in lines.iter().skip(top).take(body) {
         let text: String = line.text.chars().take(cols).collect();
         match line.style {
-            Style::Art if color => out.push_str(&format!("\x1b[1;36m{text}\x1b[0m")),
-            Style::Art | Style::Title => out.push_str(&format!("\x1b[1m{text}\x1b[0m")),
+            // Laid out to fit already, and its colours aren't columns.
+            Style::Art => out.push_str(&line.text),
+            Style::Title => out.push_str(&format!("\x1b[1m{text}\x1b[0m")),
             Style::Plain => out.push_str(&text),
         }
         out.push_str("\x1b[K\r\n");
@@ -226,36 +228,46 @@ mod tests {
         read_key(&mut |_| Ok(bytes.next())).ok().flatten()
     }
 
+    const ASCII: art::Look = art::Look { utf8: false, colors: art::Colors::None };
+
     #[test]
     fn fits_an_80_column_terminal() {
-        for line in content("", "encryptor 9.9.9") {
-            assert!(line.text.len() <= 80, "{:?} is {} wide", line.text, line.text.len());
-            assert!(line.text.is_ascii());
+        for utf8 in [true, false] {
+            let look = art::Look { utf8, colors: art::Colors::Rich };
+            for line in content("", "encryptor 9.9.9", 80, look) {
+                let shown = &visible(&line.text)[0];
+                assert!(shown.chars().count() <= 80, "{shown:?} is {} wide", shown.chars().count());
+                assert!(utf8 || shown.is_ascii());
+            }
         }
     }
 
     #[test]
     fn shows_the_art_version_help_and_keys() {
-        let lines = content("USAGE:\n    encrypt FILE", "encryptor 9.9.9");
-        let screen = visible(&frame(&lines, 0, 30, 80, true));
+        let lines = content("USAGE:\n    encrypt FILE", "encryptor 9.9.9", 80, ASCII);
+        let screen = visible(&frame(&lines, 0, 30, 80));
         assert_eq!(screen.len(), 30, "one row for each line of the terminal");
         assert!(screen[2].contains("___ _ __   ___"), "{:?}", screen[2]);
         assert!(screen.iter().any(|row| row.trim() == "encryptor 9.9.9"));
         assert!(screen.iter().any(|row| row.trim() == "encrypt FILE"));
         assert!(screen[29].starts_with(" e encrypt   d decrypt   v view   q quit"));
         assert!(!screen[29].contains("of"), "everything fits, so no position");
+
+        let block = content("", "encryptor 9.9.9", 80, art::Look { utf8: true, ..ASCII });
+        assert!(visible(&block[3].text)[0].contains("██║   .'-'--'-'.██████╔╝"), "the padlock in place of the O");
+        assert!(content("", "v", 40, ASCII)[0].text.contains('v'), "no art in a narrow window");
     }
 
     #[test]
     fn scrolls_and_cuts_to_a_small_terminal() {
         let usage: String = (1..=40).map(|n| format!("line {n}\n")).collect();
-        let lines = content(&usage, "v");
-        let screen = visible(&frame(&lines, 10, 12, 30, false));
+        let lines = content(&usage, "v", 80, ASCII);
+        let screen = visible(&frame(&lines, 10, 12, 30));
         assert_eq!(screen.len(), 12);
         assert!(screen.iter().all(|row| row.chars().count() <= 30), "{screen:?}");
         assert_eq!(screen[0].trim(), "line 1");
         assert!(screen[11].starts_with(" e encrypt"), "{:?}", screen[11]);
-        assert!(visible(&frame(&lines, 10, 12, 80, false))[11].ends_with(&format!("11-21 of {} ", lines.len())));
+        assert!(visible(&frame(&lines, 10, 12, 80))[11].ends_with(&format!("11-21 of {} ", lines.len())));
     }
 
     #[test]

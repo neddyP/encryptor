@@ -5,6 +5,7 @@
 //! still read (see `legacy`). From version 2 the plaintext starts with the
 //! original file's metadata (see `meta`).
 
+mod art;
 mod cli;
 mod decrypt;
 mod desktop;
@@ -192,7 +193,7 @@ fn choose_at_home() -> Result<Option<Command>> {
 
 fn version() -> String {
     format!(
-        "encryptor {}, writing file format {} ({VERSION} with a passphrase) and reading formats 1 to {VERSION}",
+        "encryptor {}, writing file formats {} and {VERSION} and reading formats 1 to {VERSION}",
         env!("CARGO_PKG_VERSION"),
         stream::VERSION
     )

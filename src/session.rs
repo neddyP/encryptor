@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{Error, Result};
-use crate::{home, recording, term};
+use crate::{art, recording, term};
 
 /// Onto the alternate screen, cleared.
 const ENTER: &str = "\x1b[?1049h\x1b[H\x1b[2J";
@@ -76,11 +76,10 @@ pub fn header() {
     if !active() {
         return;
     }
-    let color = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
     // The classic 80 columns if the terminal doesn't say.
     let cols = term::size(libc::STDERR_FILENO).map_or(80, |(_, cols)| cols);
     let text = match header_lock().as_ref() {
-        Some(header) => render(&header.version, &header.notes, cols, color),
+        Some(header) => render(&header.version, &header.notes, cols, art::Look::detect()),
         None => return,
     };
     let _ = to_terminal(&format!("\x1b[H\x1b[2J{text}"));
@@ -143,15 +142,14 @@ fn header_lock() -> std::sync::MutexGuard<'static, Option<Header>> {
 
 /// The art, when the window is wide enough for it, the version, and the
 /// remembered lines, each followed by a blank line.
-fn render(version: &str, notes: &[String], cols: usize, color: bool) -> String {
+fn render(version: &str, notes: &[String], cols: usize, look: art::Look) -> String {
     let mut out = String::new();
     let margin = "  ";
-    let art_width = margin.len() + home::ART.iter().map(|line| line.len()).max().unwrap_or(0);
-    if cols >= art_width {
-        let style = if color { "\x1b[1;36m" } else { "\x1b[1m" };
-        for line in home::ART {
-            out.push_str(&format!("{margin}{style}{line}\x1b[0m\n"));
-        }
+    let art = art::rows(cols.saturating_sub(margin.len()), look.utf8);
+    for (i, row) in art.iter().enumerate() {
+        out.push_str(&format!("{margin}{}\n", art::paint(row, i, art.len(), look.colors)));
+    }
+    if !art.is_empty() {
         out.push('\n');
     }
     out.push_str(&format!("{margin}\x1b[1m{version}\x1b[0m\n\n"));
@@ -198,7 +196,8 @@ mod tests {
     #[test]
     fn draws_the_art_then_the_version_then_the_notes() {
         let notes = vec!["File to encrypt: report.pdf".to_string(), "Key saved as: report.pdf.key".to_string()];
-        let lines = visible(&render("encryptor 9.9.9", &notes, 80, true));
+        let look = art::Look { utf8: false, colors: art::Colors::Basic };
+        let lines = visible(&render("encryptor 9.9.9", &notes, 80, look));
         let version = lines.iter().position(|line| line.trim() == "encryptor 9.9.9").expect("the version");
         assert!(lines[..version].iter().any(|line| line.contains("___ _ __   ___")), "art above the version");
         let file = lines.iter().position(|line| line == "File to encrypt: report.pdf").expect("the first note");
@@ -209,7 +208,8 @@ mod tests {
 
     #[test]
     fn leaves_out_the_art_when_too_narrow_for_it() {
-        let lines = visible(&render("encryptor 9.9.9", &[], 40, false));
+        let look = art::Look { utf8: true, colors: art::Colors::None };
+        let lines = visible(&render("encryptor 9.9.9", &[], 40, look));
         assert!(!lines.iter().any(|line| line.contains("___")), "{lines:?}");
         assert_eq!(lines[0].trim(), "encryptor 9.9.9");
     }
