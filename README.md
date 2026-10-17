@@ -16,116 +16,74 @@ curl -fsSL https://raw.githubusercontent.com/neddyP/encryptor/master/install.sh 
 ```
 
 That downloads the one prebuilt binary for your system, about 1 MB, into
-`/usr/local/bin`. It needs nothing else: no Node.js, no Rust. Or install it
-with npm:
-
-```
-npm install -g @neddyp/encryptor
-```
-
-Either way, `encryptor update` updates it. See [Install](#install) for details.
+`/usr/local/bin`, and needs nothing else. It can also be installed with npm,
+and `encryptor update` updates it either way; see [Install](#install).
 
 ## Features
 
 - **AES-256-GCM authenticated encryption.** Any change to an encrypted file,
   even a single bit, is detected and decryption refuses to proceed.
-- **View without decrypting to disk.** `encryptor view` (or `-v`) decrypts a
-  file into locked memory and shows it on a screen of its own, which keeps
-  no scrollback, until you press Enter. Then it's erased and encrypted
-  again, with the same key or a new one, as you choose. The plaintext is
-  only ever in locked memory and on the terminal, and the encrypted file is
-  untouched until the new one has been checked.
-- **Random or your own keys.** Generate a 256-bit key from the operating
-  system's secure random generator, or supply one as 64 hex characters or a
-  32-byte key file.
-- **Generated keys are never shown unless you ask.** Save the key as a
-  binary file readable only by you, print it once, or both.
-- **Printed keys leave no trace.** A printed key appears on the terminal's
-  alternate screen, which keeps no scrollback, and is erased when you press
-  Enter. It is written straight to the terminal, never to standard output, so
-  redirecting the output to a file can't capture it.
-- **Warned before printing into a recording.** Before printing a key, the
-  tool looks for anything that would capture it, such as `script`,
-  `asciinema`, a terminal sharing tool, tmux `pipe-pane` or a tracer. If it
-  finds one, it names it, with its PID and the file it writes to, warns that
-  printing would compromise the encryption, and asks whether to print anyway.
-- **Verified before anything is deleted.** After encrypting, the new file is
-  flushed to disk and read back from the disk itself, not from the copy the
-  system keeps in memory, then decrypted, and its SHA-256 is compared with
-  the original. The original is deleted only if they match. Decrypted files
-  are checked the same way.
-- **Original overwritten, then deleted.** The plaintext file is overwritten
-  with zeros and flushed to disk, renamed to random characters so its name
-  doesn't linger either, then removed. It is opened once and handled through
-  that one handle, so swapping it for a symlink part way through can't
-  redirect the overwrite to another file. A read-only original you own is
-  allowed writing just long enough to open it, with its permissions put back
-  straight away. A file that can't be overwritten, or that other names (hard
-  links) also lead to, is refused before any key is made.
-- **Nothing left in memory.** Keys, plaintext and typed input are kept in RAM
-  (never swapped out) and zeroed as soon as they're no longer needed, and
-  every other block of memory the tool frees, holding file names, answers or
-  the report, is overwritten with zeros too. Core dumps are disabled, and on
-  Linux other programs running as you can't read the tool's memory.
-- **Nothing left on disk.** Unused key files, partial output, output that
-  fails verification, and a file that decrypting replaces are overwritten
-  with zeros before they're deleted, and temporary files have random names.
-  The tool writes no logs.
-- **No trace on the desktop.** On Linux, the original's thumbnails (small
-  pictures of its contents, made when a file manager or file picker showed
-  it) are shredded, and its entry in the desktop's list of recently used
-  files is removed.
-- **No trace in shell history.** Every run removes the entries in your bash,
-  zsh and fish history files that ran the tool, including the history macOS's
-  Terminal keeps for each window (`~/.bash_sessions`, `~/.zsh_sessions`), and
-  every key it uses is removed with the entries holding it, in case it was
-  ever typed or pasted into a command. The files are rewritten in place, and
-  the bytes left over are zeroed before they're cut short.
-- **Its own files don't show when it ran.** Running a program reads its
-  files, which updates their last-read times. At the end of every run, its
-  binary's last-read time is set back to when it was installed, and with the
-  npm package, so are the package's files, the command's link and the Node.js
-  that started it. The folders a run writes in get their modified times set
-  back to what they were before it started.
-- **Offline unless you update.** encryptor never connects to the network on
-  its own. `encryptor update` is the only thing that does, and only when you
-  run it.
-- **Saved summaries don't name the file.** The report on screen is complete,
-  but a summary you choose to save is called `encryption-summary.txt` (or
-  `decryption-summary.txt`), and every file name and path in it is replaced
-  with `…`. It says what was done, not to which file.
-- **Runs on a screen of its own, wiped when you're done.** At a terminal,
-  whatever the command, encryptor takes over the window, with its name in
-  large letters at the top. When you press Enter at the end, everything it
-  showed is wiped and your window comes back as it was, with all its earlier
-  history. None of it reaches the window's scrollback.
-- **Warned about disks that keep old copies.** On a copy-on-write filesystem
-  (APFS, btrfs, ZFS and the like) overwriting can't reach a file's old
-  contents, so you're told and asked before encrypting.
-- **Hidden key entry.** Keys typed at the prompt are not echoed. When
-  encrypting, a typed key must be entered twice so a typo can't lock the file
-  for good.
-- **Safe to interrupt.** Ctrl-C at any point stops cleanly: keys are wiped,
-  unused key files and partial output are shredded, and the original is left
-  untouched unless encryption had already been verified. Shredding a large
-  partial file shows its progress.
+- **View without decrypting to disk.** `encryptor view` shows a file from
+  locked memory on a screen of its own, then erases it and encrypts it
+  again, with the same key or a new one. See [Viewing](#viewing).
+- **Random or your own keys.** A 256-bit key from the operating system's
+  secure random generator, saved as a file only you can read, printed once,
+  or both, and never shown unless you ask. Or your own, as 64 hex
+  characters or a 32-byte key file.
+- **Printed keys leave no trace.** A printed key goes straight to the
+  terminal, never to standard output, on a screen with no scrollback, and is
+  erased when you press Enter. Anything that would capture it, such as
+  `script`, a sharing tool, tmux `pipe-pane` or a tracer, is named first,
+  and you're asked.
+- **Verified before anything is deleted.** The encrypted file is read back
+  from the disk itself, not the system's cached copy, and decrypted, and the
+  original is deleted only if its SHA-256 matches. Decrypted files are
+  checked the same way.
+- **Original overwritten, then deleted.** It's zeroed, flushed and renamed
+  to random characters before it's removed, all through one open handle, so
+  swapping in a symlink part way through can't redirect the overwrite. A file
+  that can't be overwritten, or that hard links also lead to, is refused
+  before any key is made.
+- **Nothing left in memory or on disk.** Keys, plaintext and typed input are
+  kept in locked RAM and zeroed after use, and so is every other block of
+  memory the tool frees. Core dumps are off, and on Linux other programs
+  can't read its memory. Unused key files and partial or rejected output are
+  zeroed before they're deleted, temporary files have random names, and
+  there are no logs.
+- **No trace on the desktop or in shell history.** On Linux, the original's
+  thumbnails and its recently used entry are removed. Every run removes the
+  bash, zsh and fish history entries that ran the tool or hold a key it used,
+  including macOS Terminal's history for each window, and zeroes what's cut.
+- **Its own files don't show when it ran.** Its last-read times are set back
+  to when it was installed, with npm's files and Node.js's too, and the
+  folders a run writes in get their modified times back.
+- **Offline unless you update.** Only `encryptor update` goes online, and
+  only when you run it.
+- **Saved summaries don't name the file.** Every name and path in a summary
+  you save is replaced with `…`.
+- **Runs on a screen of its own,** with its name in large letters, wiped
+  when you press Enter at the end, leaving your window as it was.
+- **Warned about disks that keep old copies.** On a copy-on-write
+  filesystem (APFS, btrfs, ZFS) overwriting can't reach the old contents, so
+  you're told and asked first.
+- **Hidden key entry.** Typed keys aren't echoed, and when encrypting are
+  entered twice, so a typo can't lock the file for good.
+- **Safe to interrupt.** Ctrl-C wipes keys and shreds unused key files and
+  partial output, and the original stays unless it was already encrypted and
+  verified.
 - **Files of any size, in a few megabytes of memory.** Files are encrypted
-  in 64 KiB chunks, each authenticated on its own, so even files far larger
-  than the computer's memory are handled with only one chunk in memory at a
-  time, and plaintext never leaves locked RAM. Large files show their
-  progress.
-- **Metadata comes back too.** Permissions, timestamps, owner and extended
-  attributes (which hold ACLs on Linux, and Finder tags and download
-  quarantine on macOS) are stored inside the encryption, so they don't leak,
-  and put back on the decrypted file. Any file type works: the tool only sees
-  bytes.
-- **Errors that say how to fix them.** A missing file suggests the one you
-  probably meant, a full or read-only disk or a FAT32 size limit is named as
-  such, a file that isn't encrypted is identified (a zip, a PDF, or a file
-  from OpenSSL, GPG or age), and a mistyped key is described without being
-  shown. Suggested commands use your own file names, ready to paste.
-- **Crash-safe writes.** Output goes to a temporary file that is renamed into
-  place, so a half-written file never appears under the final name.
+  in 64 KiB chunks, each authenticated on its own, with progress shown for
+  large ones.
+- **Metadata comes back too.** Permissions, times, owner and extended
+  attributes (ACLs, Finder tags, download quarantine) are stored inside the
+  encryption and restored. Any file type works: the tool only sees bytes.
+- **Errors that say how to fix them,** with commands to paste using your own
+  file names. A missing file suggests the one you meant, a full or read-only
+  disk or FAT32's size limit is named, a file that isn't encrypted is
+  identified (a zip, a PDF, or a file from OpenSSL, GPG or age), and a
+  mistyped key is described without being shown.
+- **Crash-safe writes.** Output is written under a temporary name and
+  renamed into place, so a half-written file never has the final name.
 
 ## Install
 
