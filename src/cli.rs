@@ -166,7 +166,9 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
         Command::Encrypt if options.output.is_some() => only("--output", "decrypt"),
         Command::Encrypt if options.overwrite => only("--overwrite", "decrypt"),
         Command::Decrypt if options.new_key.is_some() => only("--new-key", "encrypt"),
-        Command::Decrypt if options.keep => only("--keep", "encrypt, which deletes the original; decrypt keeps it anyway"),
+        Command::Decrypt if options.keep => {
+            Err(Error::Usage("--keep only applies to encrypt: decrypt always keeps the encrypted file".into()))
+        }
         Command::View
             if options.new_key.is_some() || options.output.is_some() || options.keep || options.overwrite || options.yes =>
         {

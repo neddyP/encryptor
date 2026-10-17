@@ -89,7 +89,7 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
     eprintln!("Key generated (not displayed).");
 
     let mut saved_to = None;
-    if confirm("Save symmetric encryption key as a file in your current directory?")? {
+    if confirm("Save the key to a file in the current folder?")? {
         saved_to = Some(save(&key, input, key_file)?);
     }
     let mut printed = if confirm("Print the key?")? { print(&key)? } else { Printed::No };
@@ -98,8 +98,8 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
     // and the file with it, so one of the two is required.
     if saved_to.is_none() && printed == Printed::No {
         eprintln!();
-        eprintln!("WARNING: the key has been neither saved nor printed. It exists only in");
-        eprintln!("this program's memory, so the encrypted file could never be decrypted.");
+        eprintln!("WARNING: the key is neither saved nor printed, so once this program exits,");
+        eprintln!("the encrypted file could never be decrypted.");
         loop {
             if choose("Print or save the key?", &["print", "save"])? == "save" {
                 saved_to = Some(save(&key, input, key_file)?);
@@ -123,8 +123,7 @@ fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Resu
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     eprintln!("Key saved as: {}", safe(&name));
     session::remember(format!("Key saved as: {}", safe(&name)));
-    eprintln!("Keep this file safe: anyone who has it can decrypt the file, and");
-    eprintln!("without the key the file cannot be decrypted.");
+    eprintln!("Keep it safe: anyone with it can decrypt the file, and without it no one can.");
     Ok(path)
 }
 
@@ -137,14 +136,12 @@ fn print(key: &[u8; KEY_LEN]) -> Result<Printed> {
         // Only someone at the keyboard can agree to this, not an answer piped
         // in, which could be meant for another question or be `yes`.
         if !io::stdin().is_terminal() {
-            eprintln!("The key was not printed, since it would be captured and there's no one at the");
-            eprintln!("keyboard to agree to that. Save it to a file instead, such as with --new-key.");
+            eprintln!("Key not printed: it would be captured, and only someone at the keyboard can");
+            eprintln!("agree to that. Save it to a file instead, such as with --new-key.");
             return Ok(Printed::No);
         }
-        if !confirm(&format!(
-            "Printing the key would save it to {by} compromising your encryption, \
-             do you still wish to print your decryption key?"
-        ))? {
+        let question = format!("Printing the key would save it to {by}, compromising your encryption. Print it anyway?");
+        if !confirm(&question)? {
             eprintln!("Key not printed.");
             return Ok(Printed::No);
         }
@@ -262,7 +259,7 @@ fn create_key_file(key: &[u8; KEY_LEN], path: &Path) -> std::result::Result<Path
 /// unrecoverable. `give_up` is the error after three failed attempts.
 pub fn prompt(confirm_typed: bool, give_up: &str) -> Result<(SecretKey, Option<PathBuf>)> {
     for _ in 0..3 {
-        let input = term::read_secret("Enter key (64 hex characters, or path to a key file from current directory): ")?;
+        let input = term::read_secret("Enter the key (64 hex characters) or the path to its key file: ")?;
         let (key, key_file) = match parse(&input) {
             Ok(parsed) => parsed,
             Err(e) => {

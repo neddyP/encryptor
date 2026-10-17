@@ -351,10 +351,9 @@ them yourself once you've checked the encrypted file.
 $ encrypt report.pdf
 Generate a random 256-bit key? [y/n]: y
 Key generated (not displayed).
-Save symmetric encryption key as a file in your current directory? [y/n]: y
+Save the key to a file in the current folder? [y/n]: y
 Key saved as: report.pdf.key
-Keep this file safe: anyone who has it can decrypt the file, and
-without the key the file cannot be decrypted.
+Keep it safe: anyone with it can decrypt the file, and without it no one can.
 Print the key? [y/n]: n
 Encrypt using AES-256-GCM? [y/n]: y
 
@@ -435,7 +434,7 @@ Print the key? [y/n]: y
 WARNING: something is recording or sharing this terminal session:
   - script (PID 4242): records the terminal session
       writing to /home/you/typescript
-Printing the key would save it to script compromising your encryption, do you still wish to print your decryption key? [y/n]: n
+Printing the key would save it to script, compromising your encryption. Print it anyway? [y/n]: n
 Key not printed.
 ```
 
@@ -466,7 +465,7 @@ recorders can't be seen from inside the session; see
 
 ```
 $ decrypt report.pdf.enc
-Enter key (64 hex characters, or path to a key file from current directory):
+Enter the key (64 hex characters) or the path to its key file:
 Decrypt using AES-256-GCM? [y/n]: y
 
 ----------------------------------------------------------------
@@ -537,7 +536,7 @@ then encrypts it again:
 
 ```
 $ encryptor view report.txt.enc
-Enter key (64 hex characters, or path to a key file from current directory):
+Enter the key (64 hex characters) or the path to its key file:
 
 Before it's shown:
   - It's held only in locked memory, never written to swap or disk, and
