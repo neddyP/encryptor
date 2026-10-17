@@ -1,10 +1,15 @@
-//! Version 3 files, encrypted in chunks so that a file of any size is handled
-//! in a small, fixed amount of memory, with every chunk authenticated.
+//! Version 3 and 4 files, encrypted in chunks so that a file of any size is
+//! handled in a small, fixed amount of memory, with every chunk
+//! authenticated. Version 4 is for passphrases: its header holds the Argon2id
+//! settings that turn the passphrase into the key (see `kdf`).
 //!
 //! ```text
 //! +--------------+-------------+-----------+---------+---------+-----
 //! | magic "AGCM" | version (3) | salt (32) | chunk 0 | chunk 1 | ...
 //! +--------------+-------------+-----------+---------+---------+-----
+//! +--------------+-------------+---------------+-----------+---------+-----
+//! | magic "AGCM" | version (4) | Argon2id (12) | salt (32) | chunk 0 | ...
+//! +--------------+-------------+---------------+-----------+---------+-----
 //! ```
 //!
 //! Each chunk is up to 64 KiB of plaintext encrypted with AES-256-GCM,
@@ -28,24 +33,61 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::meta::Metadata;
-use crate::protect;
+use crate::{kdf, protect};
 
+/// Written for files encrypted with a key.
 pub const VERSION: u8 = 3;
-const SALT_START: usize = 5;
-pub const HEADER_LEN: usize = SALT_START + 32;
+/// Written for files encrypted with a passphrase.
+pub const PASSPHRASE_VERSION: u8 = 4;
+const SALT_LEN: usize = 32;
+/// A version 3 header's length.
+pub const HEADER_LEN: usize = 5 + SALT_LEN;
+/// A version 4 header's length.
+pub const PASSPHRASE_HEADER_LEN: usize = HEADER_LEN + kdf::LEN;
 pub const CHUNK: usize = 64 * 1024;
 pub const TAG_LEN: usize = 16;
-/// The shortest possible file: the header and one chunk holding the 4-byte
-/// metadata length.
-pub const MIN_LEN: u64 = (HEADER_LEN + 4 + TAG_LEN) as u64;
 const KEY_INFO: &[u8] = b"encryptor v3 file key";
+
+/// The header's length in a file of `version`, 3 or 4.
+pub fn header_len(version: u8) -> usize {
+    if version == PASSPHRASE_VERSION { PASSPHRASE_HEADER_LEN } else { HEADER_LEN }
+}
+
+/// The shortest possible file of `version`, 3 or 4: the header and one chunk
+/// holding the 4-byte metadata length.
+pub fn min_len(version: u8) -> u64 {
+    (header_len(version) + 4 + TAG_LEN) as u64
+}
+
+/// A new header with a random salt: version 3, or with `passphrase`'s
+/// Argon2id settings, version 4.
+pub fn header(passphrase: Option<&kdf::Params>) -> Result<Vec<u8>, Error> {
+    let mut header = crate::MAGIC.to_vec();
+    match passphrase {
+        None => header.push(VERSION),
+        Some(params) => {
+            header.push(PASSPHRASE_VERSION);
+            header.extend_from_slice(&params.to_bytes());
+        }
+    }
+    let start = header.len();
+    header.resize(start + SALT_LEN, 0);
+    getrandom::fill(&mut header[start..]).map_err(Error::Random)?;
+    Ok(header)
+}
+
+/// The salt, which ends every header.
+pub fn salt(header: &[u8]) -> &[u8] {
+    &header[header.len() - SALT_LEN..]
+}
 
 pub enum Error {
     Read(io::Error),
     Write(io::Error),
-    /// Chunk n failed to authenticate. For the first chunk that can be the
-    /// wrong key; for any later one the key is right and the file damaged.
-    Auth(u64),
+    /// A chunk failed to authenticate. For the first that can be the wrong
+    /// key; for any later one the key is right and the file is damaged from
+    /// byte `at` on.
+    Auth { chunk: u64, at: u64 },
     /// Too short to hold even one complete chunk.
     Truncated,
     Metadata(String),
@@ -78,23 +120,20 @@ pub struct Decrypted {
     pub hash: Zeroizing<[u8; 32]>,
 }
 
-/// Writes a version 3 file to `out`: the header, then `metadata` (already
+/// Writes a file to `out`: `header` (see `header`), then `metadata` (already
 /// encoded) followed by exactly `len` bytes read from `input`, in chunks.
 /// `progress` is told how much of `input` has been read.
 pub fn encrypt(
     key: &[u8; 32],
+    header: &[u8],
     metadata: &[u8],
     input: &mut impl Read,
     len: u64,
     out: &mut impl Write,
     progress: &mut impl FnMut(u64),
 ) -> Result<Encrypted, Error> {
-    let mut header = [0u8; HEADER_LEN];
-    header[..4].copy_from_slice(crate::MAGIC);
-    header[4] = VERSION;
-    getrandom::fill(&mut header[SALT_START..]).map_err(Error::Random)?;
-    out.write_all(&header).map_err(Error::Write)?;
-    let cipher = file_cipher(key, &header);
+    out.write_all(header).map_err(Error::Write)?;
+    let cipher = file_cipher(key, header);
 
     let total = metadata.len() as u64 + len;
     let chunks = total.div_ceil(CHUNK as u64);
@@ -115,19 +154,19 @@ pub fn encrypt(
         progress(read);
 
         let tag = cipher
-            .encrypt_inout_detached(&nonce(n, n + 1 == chunks), &header, (&mut buf[..size]).into())
+            .encrypt_inout_detached(&nonce(n, n + 1 == chunks), header, (&mut buf[..size]).into())
             .expect("a 64 KiB chunk is well within AES-GCM's limit");
         out.write_all(&buf[..size]).and_then(|()| out.write_all(&tag)).map_err(Error::Write)?;
     }
     Ok(Encrypted { hash: Zeroizing::new(hasher.finalize().into()), chunks })
 }
 
-/// Decrypts the chunks of a version 3 file that follow `header`, reading the
-/// `body_len` bytes after it from `input` and writing the contents to `out`.
-/// `progress` is told how much of the body has been read.
+/// Decrypts the chunks of a version 3 or 4 file that follow `header`, reading
+/// the `body_len` bytes after it from `input` and writing the contents to
+/// `out`. `progress` is told how much of the body has been read.
 pub fn decrypt(
     key: &[u8; 32],
-    header: &[u8; HEADER_LEN],
+    header: &[u8],
     input: &mut impl Read,
     body_len: u64,
     out: &mut impl Write,
@@ -156,7 +195,9 @@ pub fn decrypt(
 
         let (data, tag) = buf[..size].split_at_mut(size - TAG_LEN);
         let tag = <&Tag<Aes256Gcm>>::try_from(&*tag).expect("tags are 16 bytes");
-        cipher.decrypt_inout_detached(&nonce(n, last), header, data.into(), tag).map_err(|_| Error::Auth(n))?;
+        cipher
+            .decrypt_inout_detached(&nonce(n, last), header, data.into(), tag)
+            .map_err(|_| Error::Auth { chunk: n, at: (header.len() as u64) + n * full })?;
         unpack.feed(data, &mut |contents: &[u8]| {
             hasher.update(contents);
             len += contents.len() as u64;
@@ -168,9 +209,9 @@ pub fn decrypt(
 }
 
 /// The cipher for one file, under the key derived from `key` and the salt.
-fn file_cipher(key: &[u8; 32], header: &[u8; HEADER_LEN]) -> Aes256Gcm {
+fn file_cipher(key: &[u8; 32], header: &[u8]) -> Aes256Gcm {
     let mut file_key = Zeroizing::new([0u8; 32]);
-    Hkdf::<Sha256>::new(Some(&header[SALT_START..]), key)
+    Hkdf::<Sha256>::new(Some(salt(header)), key)
         .expand(KEY_INFO, &mut file_key[..])
         .expect("32 bytes is a valid HKDF-SHA256 length");
     Aes256Gcm::new((&*file_key).into())
@@ -241,24 +282,27 @@ mod tests {
     const KEY: [u8; 32] = [7; 32];
 
     fn encrypt_bytes(key: &[u8; 32], metadata: &[u8], contents: &[u8]) -> (Vec<u8>, Encrypted) {
+        encrypt_with(key, &header(None).unwrap_or_else(|_| panic!("no random salt")), metadata, contents)
+    }
+
+    fn encrypt_with(key: &[u8; 32], header: &[u8], metadata: &[u8], contents: &[u8]) -> (Vec<u8>, Encrypted) {
         let mut out = Vec::new();
-        let sealed = encrypt(key, metadata, &mut &contents[..], contents.len() as u64, &mut out, &mut |_| {})
+        let sealed = encrypt(key, header, metadata, &mut &contents[..], contents.len() as u64, &mut out, &mut |_| {})
             .unwrap_or_else(|_| panic!("encryption failed"));
         (out, sealed)
     }
 
     fn decrypt_bytes(key: &[u8; 32], file: &[u8]) -> Result<(Decrypted, Vec<u8>), Error> {
-        let header: [u8; HEADER_LEN] = file[..HEADER_LEN].try_into().unwrap();
-        let mut body = &file[HEADER_LEN..];
+        let (header, mut body) = file.split_at(header_len(file[4]).min(file.len()));
         let body_len = body.len() as u64;
         let mut out = Vec::new();
-        let opened = decrypt(key, &header, &mut body, body_len, &mut out, &mut |_| {})?;
+        let opened = decrypt(key, header, &mut body, body_len, &mut out, &mut |_| {})?;
         Ok((opened, out))
     }
 
     fn auth_failure(result: Result<(Decrypted, Vec<u8>), Error>) -> Option<u64> {
         match result {
-            Err(Error::Auth(n)) => Some(n),
+            Err(Error::Auth { chunk, .. }) => Some(chunk),
             _ => None,
         }
     }
@@ -306,7 +350,7 @@ mod tests {
         let (file, _) = encrypt_bytes(&KEY, &empty_metadata(), &[1; 3 * CHUNK]);
         assert_eq!(auth_failure(decrypt_bytes(&[8; 32], &file)), Some(0));
         // The salt is part of the key, and the header is authenticated.
-        for i in [4, SALT_START, HEADER_LEN - 1] {
+        for i in [4, 5, HEADER_LEN - 1] {
             let mut changed = file.clone();
             changed[i] ^= 1;
             assert_eq!(auth_failure(decrypt_bytes(&KEY, &changed)), Some(0), "byte {i}");
@@ -354,10 +398,34 @@ mod tests {
     }
 
     #[test]
+    fn writes_passphrase_settings_into_a_version_4_header() {
+        let params = kdf::Params { memory_kib: 64, passes: 2, lanes: 1 };
+        let header = header(Some(&params)).unwrap_or_else(|_| panic!("no random salt"));
+        assert_eq!((header.len(), header[4]), (PASSPHRASE_HEADER_LEN, PASSPHRASE_VERSION));
+        assert_eq!(kdf::Params::from_bytes(&header[5..5 + kdf::LEN]), Some(params));
+        let (file, _) = encrypt_with(&KEY, &header, &empty_metadata(), &[5; 2 * CHUNK]);
+        let (_, out) = decrypt_bytes(&KEY, &file).unwrap_or_else(|_| panic!("failed"));
+        assert_eq!(out, [5; 2 * CHUNK]);
+
+        // The settings are authenticated, and damage is placed after the
+        // longer header.
+        let mut changed = file.clone();
+        changed[6] ^= 1;
+        assert_eq!(auth_failure(decrypt_bytes(&KEY, &changed)), Some(0));
+        let mut damaged = file.clone();
+        damaged[PASSPHRASE_HEADER_LEN + CHUNK + TAG_LEN + 1] ^= 1;
+        let full = (CHUNK + TAG_LEN) as u64;
+        assert!(matches!(
+            decrypt_bytes(&KEY, &damaged),
+            Err(Error::Auth { chunk: 1, at }) if at == PASSPHRASE_HEADER_LEN as u64 + full
+        ));
+    }
+
+    #[test]
     fn gives_every_file_its_own_key() {
         let (a, _) = encrypt_bytes(&KEY, &empty_metadata(), b"same");
         let (b, _) = encrypt_bytes(&KEY, &empty_metadata(), b"same");
-        assert_ne!(a[SALT_START..HEADER_LEN], b[SALT_START..HEADER_LEN]);
+        assert_ne!(salt(&a[..HEADER_LEN]), salt(&b[..HEADER_LEN]));
         assert_ne!(a[HEADER_LEN..], b[HEADER_LEN..]);
     }
 
@@ -366,9 +434,10 @@ mod tests {
         let contents = vec![4; 2 * CHUNK + 100];
         let mut seen = Vec::new();
         let mut out = Vec::new();
-        let _ = encrypt(&KEY, &empty_metadata(), &mut &contents[..], contents.len() as u64, &mut out, &mut |done| {
-            seen.push(done)
-        });
+        let header = header(None).unwrap_or_else(|_| panic!("no random salt"));
+        let len = contents.len() as u64;
+        let mut record = |done| seen.push(done);
+        let _ = encrypt(&KEY, &header, &empty_metadata(), &mut &contents[..], len, &mut out, &mut record);
         assert_eq!(seen, [CHUNK as u64 - 4, 2 * CHUNK as u64 - 4, contents.len() as u64]);
     }
 

@@ -3,7 +3,7 @@
 //! checks, the key and decrypting whole files are shared with `view`.
 
 use std::fs::File;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -17,16 +17,26 @@ use crate::keys::{self, SecretKey};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe, safe_path};
-use crate::{KEY_LEN, MAGIC, VERSION, history, legacy, protect, stream, timestamps, wipe};
+use crate::{KEY_LEN, MAGIC, VERSION, history, kdf, legacy, protect, stream, timestamps, wipe};
 
 /// An encrypted file, open and checked, with its start already read.
 pub struct Encrypted {
-    /// The open file, positioned after the header of a version 3 file, which
-    /// is decrypted from this same handle.
+    /// The open file. A version 3 or 4 file is decrypted from this same
+    /// handle, which is at the end of its header.
     pub source: File,
+    /// Its first bytes: a version 3 or 4 file's whole header.
     pub start: Vec<u8>,
     pub version: u8,
     pub len: u64,
+}
+
+/// The key a file opens with, the key file it came from, if any, and what
+/// cleaning shell history of the key or passphrase did.
+pub struct Unlocked {
+    pub key: SecretKey,
+    pub key_file: Option<PathBuf>,
+    pub passphrase: bool,
+    pub history: String,
 }
 
 /// Opens the file `command` was given, rejecting files this tool didn't
@@ -36,37 +46,77 @@ pub fn open(command: &str, input: &Path) -> Result<Encrypted> {
     let len = files::input_len(command, input)?;
     let read_error = |e| Error::File(explain::file(Action::Read, input, &e));
     let mut source = files::open_no_follow(input).map_err(read_error)?;
-    let mut start = Vec::with_capacity(stream::HEADER_LEN);
-    (&mut source).take(stream::HEADER_LEN as u64).read_to_end(&mut start).map_err(read_error)?;
+    let mut start = Vec::with_capacity(stream::PASSPHRASE_HEADER_LEN);
+    (&mut source).take(stream::PASSPHRASE_HEADER_LEN as u64).read_to_end(&mut start).map_err(read_error)?;
     if !start.starts_with(MAGIC) {
         return Err(Error::File(explain::not_encrypted(input, &start)));
     }
     let min_len = match start.get(MAGIC.len()) {
-        Some(&stream::VERSION) => stream::MIN_LEN,
+        Some(&version @ (stream::VERSION | stream::PASSPHRASE_VERSION)) => stream::min_len(version),
         _ => legacy::MIN_LEN,
     };
     if len < min_len {
         return Err(Error::KeyOrData(explain::too_short(input, len, min_len)));
     }
     let version = check_header(&start)?;
+    if version >= stream::VERSION {
+        let header_len = stream::header_len(version);
+        start.truncate(header_len);
+        source.seek(SeekFrom::Start(header_len as u64)).map_err(read_error)?;
+    }
     Ok(Encrypted { source, start, version, len })
 }
 
-/// The key to decrypt with, and the key file it came from: the one in
-/// `--key-file`, or else one entered. `run_again` is the command to suggest
-/// after three failed attempts, and `plain` the decrypted file's name, which
-/// the key file is usually named after.
-pub fn key(options: &Options, run_again: &str, plain: &Path) -> Result<(SecretKey, Option<PathBuf>)> {
-    if let Some(path) = &options.key_file {
-        return Ok((keys::read_key_file(path)?, Some(path.clone())));
+/// The key to decrypt `encrypted` with: for a passphrase's file, made from
+/// the passphrase entered; otherwise the one in `--key-file`, or else one
+/// entered. Shell history is cleaned of what was entered. `run_again` is the
+/// command to suggest after three failed attempts, and `plain` the decrypted
+/// file's name, which the key file is usually named after.
+pub fn key(options: &Options, run_again: &str, plain: &Path, encrypted: &Encrypted) -> Result<Unlocked> {
+    if encrypted.version == stream::PASSPHRASE_VERSION {
+        if options.key_file.is_some() {
+            return Err(Error::Usage(explain::PASSPHRASE_NOT_KEY.into()));
+        }
+        let give_up =
+            format!("no passphrase entered.\nRun {run_again} again, and enter the passphrase it was encrypted with.");
+        let passphrase = keys::enter_passphrase(&give_up)?;
+        let history = history::clean(Some(history::Secret::Passphrase(passphrase.as_bytes())));
+        let key = kdf::key_for(passphrase.as_bytes(), &encrypted.start)?;
+        return Ok(Unlocked { key, key_file: None, passphrase: true, history });
     }
-    let plain_name = plain.file_name().unwrap_or_default().to_string_lossy();
-    let give_up = format!(
-        "no valid key after 3 attempts.\nRun {run_again} again with this file's key: the 64 characters \
-         printed when it was encrypted, or its key file, usually {}.key.",
-        safe(&plain_name)
-    );
-    keys::prompt(false, &give_up)
+    let (key, key_file) = match &options.key_file {
+        Some(path) => (keys::read_key_file(path)?, Some(path.clone())),
+        None => {
+            let plain_name = plain.file_name().unwrap_or_default().to_string_lossy();
+            let give_up = format!(
+                "no valid key after 3 attempts.\nRun {run_again} again with this file's key: the 64 characters \
+                 printed when it was encrypted, or its key file, usually {}.key.",
+                safe(&plain_name)
+            );
+            keys::prompt(false, &give_up)?
+        }
+    };
+    let history = history::clean(Some(history::Secret::Key(&key)));
+    Ok(Unlocked { key, key_file, passphrase: false, history })
+}
+
+/// A failure decrypting `input` into `output` in chunks, explained for a
+/// passphrase's file too.
+pub fn failure(e: stream::Error, input: &Path, output: &Path, unlocked: &Unlocked) -> Error {
+    match e {
+        stream::Error::Auth { chunk: 0, .. } if unlocked.passphrase => {
+            Error::KeyOrData(explain::wrong_passphrase(input))
+        }
+        e => explain::stream_failure(e, input, output, unlocked.key_file.as_deref()),
+    }
+}
+
+/// The report's description of the key `start`, a header, needs.
+pub fn key_row(start: &[u8], passphrase: bool) -> String {
+    match start.get(5..5 + kdf::LEN).and_then(kdf::Params::from_bytes) {
+        Some(params) if passphrase => format!("256-bit, from your passphrase with {}", params.summary()),
+        _ => "256-bit".into(),
+    }
 }
 
 /// Decrypts a version 1 or 2 file, which was encrypted whole, into memory,
@@ -124,7 +174,7 @@ pub fn replaced_note(replaced: Replaced) -> &'static str {
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("decrypt", file)?;
-    let Encrypted { mut source, start, version, len: input_len } = open("decrypt", &input)?;
+    let encrypted = open("decrypt", &input)?;
     let read_error = |e| Error::File(explain::file(Action::Read, &input, &e));
 
     let output = options.output.clone().unwrap_or_else(|| files::decrypted_path(&input));
@@ -143,8 +193,8 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         return Err(Error::Usage(explain::needs_overwrite(&output)));
     }
 
-    let (key, key_file) = key(options, "decrypt", &output)?;
-    let history = history::clean(Some(&key));
+    let unlocked = key(options, "decrypt", &output, &encrypted)?;
+    let Encrypted { mut source, start, version, len: input_len } = encrypted;
 
     if !options.yes && !confirm("Decrypt using AES-256-GCM?")? {
         eprintln!("Cancelled; nothing was decrypted.");
@@ -162,20 +212,20 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
 
     let started = Instant::now();
     let mut out = PartFile::create(&output, replace)?;
-    let (metadata, plain_len, plain_hash) = if version == stream::VERSION {
-        let header = start[..].try_into().expect("a version 3 file this long has a whole header");
-        let body_len = source.metadata().map_err(read_error)?.len().saturating_sub(stream::HEADER_LEN as u64);
+    let (metadata, plain_len, plain_hash) = if version >= stream::VERSION {
+        let body_len = source.metadata().map_err(read_error)?.len().saturating_sub(start.len() as u64);
         let mut progress = term::Progress::new("Decrypting", body_len);
         let opened =
-            stream::decrypt(&key, &header, &mut source, body_len, &mut out, &mut |done| progress.update(done))
-                .map_err(|e| explain::stream_failure(e, &input, &output, key_file.as_deref()))?;
+            stream::decrypt(&unlocked.key, &start, &mut source, body_len, &mut out, &mut |done| progress.update(done))
+                .map_err(|e| failure(e, &input, &output, &unlocked))?;
         (Some(opened.metadata), opened.len, opened.hash)
     } else {
         // Versions 1 and 2 were encrypted whole, so they are decrypted whole.
-        let (metadata, plain) = whole(&key, &input, key_file.as_deref())?;
+        let (metadata, plain) = whole(&unlocked.key, &input, unlocked.key_file.as_deref())?;
         out.write_all(&plain).map_err(|e| Error::File(explain::file(Action::Write, &output, &e)))?;
         (metadata, plain.len() as u64, files::sha256(&plain))
     };
+    let Unlocked { key, passphrase, history, .. } = unlocked;
     drop(key);
     let replaced = out.finish()?;
     let metadata_status = settle(&output, &plain_hash, metadata)?;
@@ -193,7 +243,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         "DECRYPTION SUCCESSFUL",
         &[
             ("Cipher", "AES-256-GCM (authenticated encryption)".into()),
-            ("Key", "256-bit".into()),
+            ("Key", key_row(&start, passphrase)),
             ("Auth tag", "128-bit, valid: file is authentic and uncorrupted".into()),
             ("Input", format!("{}  {} (kept)", safe_path(&input), fmt_size(input_len))),
             ("Output", format!("{}  {}{replaced}", safe_path(&output), fmt_size(plain_len))),

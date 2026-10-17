@@ -26,10 +26,11 @@ and `encryptor update` updates it either way; see [Install](#install).
 - **View without decrypting to disk.** `encryptor view` shows a file from
   locked memory on a screen of its own, then erases it. Keeping its key
   leaves the file as it was; a new one replaces it. See [Viewing](#viewing).
-- **Random or your own keys.** A 256-bit key from the operating system's
+- **A key or a passphrase.** A 256-bit key from the operating system's
   secure random generator, saved in a folder only you can open, away from
   your files, printed once, or both, and never shown unless you ask. Or your
-  own, as 64 hex characters or a 32-byte key file.
+  own key, as 64 hex characters or a 32-byte key file. Or a passphrase,
+  made into a key with Argon2id in locked memory.
 - **Printed keys leave no trace.** A printed key goes straight to the
   terminal, never to standard output, on a screen with no scrollback, and is
   erased when you press Enter. Anything that would capture it, such as
@@ -66,8 +67,8 @@ and `encryptor update` updates it either way; see [Install](#install).
 - **Warned about disks that keep old copies.** On a copy-on-write
   filesystem (APFS, btrfs, ZFS) overwriting can't reach the old contents, so
   you're told and asked first.
-- **Hidden key entry.** Typed keys aren't echoed, and when encrypting are
-  entered twice, so a typo can't lock the file for good.
+- **Hidden key entry.** Typed keys and passphrases aren't echoed, and when
+  encrypting are entered twice, so a typo can't lock the file for good.
 - **Safe to interrupt.** Ctrl-C wipes keys and shreds unused key files and
   partial output, and the original stays unless it was already encrypted and
   verified.
@@ -307,6 +308,7 @@ them yourself once you've checked the encrypted file.
 
 ```
 $ encrypt report.pdf
+Use a 256-bit key or a custom passphrase? [p/k]: k
 Generate a random 256-bit key? [y/n]: y
 Key generated (not displayed).
 Save the key to a file in ~/.local/share/encryptor/keys? [y/n]: y
@@ -349,16 +351,23 @@ The prompts go in this order:
    without your password; on a Mac with FileVault off, the warning says so.
    It's only asked at a terminal: with `--yes`, or in a script, the warning
    is shown and encrypting goes ahead.
-1. **Generate a random key?** Answer `n` to enter your own key instead; the
+1. **A key or a passphrase?** `k` goes on to the key questions below. `p`
+   asks for a passphrase of at least 12 characters, twice, as it isn't
+   shown, and skips them. Anyone with the encrypted file can try guesses at
+   a passphrase, so use a long one, such as five or more random words. It's
+   made into the key with Argon2id (7 MiB, 40 passes), in locked memory
+   that's wiped afterwards, and the file is written in [format
+   4](#file-format), which records those settings.
+2. **Generate a random key?** Answer `n` to enter your own key instead; the
    save and print questions are then skipped.
-2. **Save the key as a file?** `y` saves it as a 32-byte binary file named
+3. **Save the key as a file?** `y` saves it as a 32-byte binary file named
    `<file>.key` (with a number added if that's taken) in
    `~/.local/share/encryptor/keys`, or `$XDG_DATA_HOME/encryptor/keys`. Only
    you can open that folder, and it's away from your files, so copying,
    backing up or syncing their folder doesn't take the key with them. To
    save a key somewhere else, use `--new-key PATH`; you're warned if that's
    beside the encrypted file.
-3. **Print the key?** `y` clears the screen and shows the key once as 64
+4. **Print the key?** `y` clears the screen and shows the key once as 64
    hex characters; press Enter when you've written it down and it's erased,
    and the screen is drawn again with the file and key file so far. The key
    screen warns that selecting the key to copy it puts it on your clipboard,
@@ -371,13 +380,13 @@ The prompts go in this order:
    If you answer `n` to both, you're warned that the key would be lost (and
    the file with it) and asked `Print or save the key? [p/s]` until you
    choose one.
-4. **Encrypt?** `n` cancels. A key file saved earlier is then removed, since
+5. **Encrypt?** `n` cancels. A key file saved earlier is then removed, since
    it never encrypted anything.
-5. **Save this summary?** `y` saves the report as `encryption-summary.txt`
+6. **Save this summary?** `y` saves the report as `encryption-summary.txt`
    in the current directory, readable only by you (a number is added if the
    name is taken), with every file name and path left out. It's only asked at a
    terminal, and not with `--yes` or `--quiet`, so scripts never wait for it.
-6. **Press Enter to exit and wipe this screen.** Everything encryptor showed
+7. **Press Enter to exit and wipe this screen.** Everything encryptor showed
    is erased and your window comes back as it was before you ran it. If
    something recorded the session, it's named first, since its copy can't be
    wiped. Ctrl-C exits too. This is the end of every run at a terminal,
@@ -448,7 +457,9 @@ Decrypt using AES-256-GCM? [y/n]: y
 
 At the key prompt, either type or paste the hex key, or give the path to the
 key file. A bare name like `report.pdf.key` is also looked for in the keys
-folder, where new keys are saved. Neither is echoed. You get three attempts. As after encrypting, you're then offered to save the summary, as
+folder, where new keys are saved. Neither is echoed. You get three attempts.
+A file encrypted with a passphrase asks `Enter the passphrase:` instead, and
+`--key-file` doesn't apply to it. As after encrypting, you're then offered to save the summary, as
 `decryption-summary.txt` with names and paths left out, and Enter exits and
 wipes the screen.
 
@@ -502,7 +513,7 @@ Enter the key (64 hex characters) or the path to its key file:
 Before it's shown:
   - It's held only in locked memory, never written to swap or disk, and
     shown on a screen of its own with no scrollback. When you press Enter,
-    it's erased, and you keep its key or encrypt it with a new one.
+    it's erased and encrypted again.
   - Anyone who can see your screen, or a screenshot, screen share or
     recording of it, sees the file too.
   - Selecting text copies it to your clipboard, and clipboard history
@@ -537,17 +548,17 @@ The file was shown, then erased from the screen.
 
 Keep its key, or encrypt it again with a new one:
   s  keep the same key, from report.txt.key, and leave the file as it was
-  n  a new key, replacing report.txt.enc
+  n  a new key or passphrase, replacing report.txt.enc
 Same key or a new one? [s/n]:
 ```
 
 - **`s`** leaves the file exactly as it was. Encrypting it again with the
   same key wouldn't change who can open it, so nothing is written.
 - **`n`** asks the key questions from scratch, as `encrypt` asks them: a
-  new random key, saved or printed, or one you enter.
+  passphrase or a key, generated and saved or printed, or one you enter.
   The file is encrypted again where it is, with a new salt and its original
   metadata, and read back from disk and checked before it replaces the old
-  one. The old key no longer opens it.
+  one. The old key or passphrase no longer opens it.
 
 If the file's folder can't be written to, it's left as it was, and you're
 told why instead of being asked. If you decide not to view it at `Show the
@@ -595,7 +606,9 @@ decrypt report.pdf.enc --key-file <(pass show keys/report) --yes   # key from a 
 Keys are never given on the command line itself, since every user can see
 command lines and the shell saves them in its history. `--key-file` takes a
 32-byte key file, or 64 hex characters as `encrypt` prints them, and can be a
-pipe, so a key from a password manager never touches the disk.
+pipe, so a key from a password manager never touches the disk. Passphrases
+are for people at the keyboard: there's no option for one, so scripts use
+keys.
 
 The exit status says what happened:
 
@@ -637,6 +650,12 @@ when the shell exits. If you've done this, run `history -c` in that shell.
 | 5      | 32   | Salt, random per file                     |
 | 37     |      | Chunks, one after another                 |
 
+A file encrypted with a passphrase is version `4`, with 12 more bytes before
+the salt: Argon2id's memory in KiB, passes and lanes, each a little-endian
+u32. Its header is 49 bytes, and its key is Argon2id (version 19) of the
+passphrase, as typed in UTF-8, with those settings and the file's salt, 32
+bytes long. Everything else is as in version 3.
+
 The plaintext is split into chunks of 64 KiB, and only the last may be
 shorter. Each is encrypted with AES-256-GCM and followed by its 16-byte tag,
 so a full chunk takes 65,552 bytes on disk.
@@ -647,8 +666,8 @@ so a full chunk takes 65,552 bytes on disk.
 - **Nonces.** Chunk *n* (counting from 0) uses the 12-byte nonce made of *n*
   as an 11-byte big-endian number, then `1` for the last chunk or `0` for any
   other.
-- **Associated data.** The 37-byte header is the associated data of every
-  chunk, so it is authenticated too.
+- **Associated data.** The header is the associated data of every chunk, so
+  it is authenticated too.
 
 Changing any byte, reordering, dropping or adding chunks, or cutting the file
 short makes decryption fail. If the first chunk decrypts but a later one
@@ -705,8 +724,8 @@ contents = plaintext[4 + length:]
 
 This version still decrypts files from earlier versions, which encrypted the
 whole file in one piece, so decrypting them needs free memory the size of the
-file. Earlier versions can't read version 3 files; they say so, and how to
-update.
+file. Earlier versions can't read formats newer than theirs, such as a
+passphrase's version 4; they say so, and how to update.
 
 | Version | Made by     | Layout                                                    |
 | ------- | ----------- | --------------------------------------------------------- |
@@ -718,9 +737,10 @@ starts with the metadata, as above; version 1's is just the contents.
 
 ## Security notes
 
-- **Lose the key, lose the file.** There's no recovery or backdoor.
-  Generated keys are saved in the keys folder, away from the encrypted
-  files; back that folder up somewhere safe, apart from the files.
+- **Lose the key, lose the file.** There's no recovery or backdoor, and a
+  forgotten passphrase is as lost as a key. Generated keys are saved in the
+  keys folder, away from the encrypted files; back that folder up somewhere
+  safe, apart from the files.
 - **Overwriting isn't guaranteed to erase.** SSD wear levelling, copy-on-write
   filesystems (APFS, btrfs, ZFS), snapshots and backups can keep old copies
   of the original, and of history files and thumbnails the tool overwrites.
@@ -770,9 +790,10 @@ starts with the metadata, as above; version 1's is just the contents.
   the screen goes onto the clipboard. Locked memory stays out of swap, but a
   computer that hibernates or suspends to disk while a file is shown writes
   all of memory to the disk, so use full-disk encryption there too.
-- **Keys are raw 256-bit values, not passwords.** There's no password-based
-  key derivation, so use generated keys rather than typing in something
-  memorable.
+- **A passphrase is only as strong as it is long.** Argon2id makes each
+  guess cost time and memory, but anyone with the file can keep guessing.
+  Use five or more random words, or a generated key. A key you enter is used
+  as it is, so it should be random, not something memorable.
 - **Files the tool creates are owner-only** (mode `600`): encrypted files,
   key files, and decrypted files until they have been verified. A decrypted
   file then gets the original's permissions back, which may let others read
@@ -794,6 +815,8 @@ The tests cover round trips at sizes around the chunk boundaries, wrong-key
 rejection, detection of a change to any chunk, of chunks reordered, added or
 cut off, and of truncation, a known-answer test against a file made by
 another implementation, decrypting the earlier formats, key parsing,
+Argon2id against another implementation, passphrase files end to end, the
+keys folder,
 overwriting and deleting files (including when a file is swapped for a
 symlink part way through, is read-only, or has other names), removing shell
 history entries, thumbnails and recently used entries, escaping of untrusted file
@@ -814,11 +837,12 @@ The code is in `src/`:
 | `decrypt.rs`   | The decrypt command and its report                                   |
 | `view.rs`      | The view command, then keeping the key or encrypting it again        |
 | `pager.rs`     | Showing a decrypted file on a screen of its own, then erasing it     |
-| `keys.rs`      | Generating, saving, printing and entering keys                       |
+| `keys.rs`      | Generating, saving, printing and entering keys, and passphrases      |
 | `history.rs`   | Removing keys and runs of the tool from shell history                |
 | `timestamps.rs` | Setting its own files' last-read times back to install time     |
 | `desktop.rs`   | Removing the original's thumbnails and recently used entries         |
-| `stream.rs`    | Chunked encryption, format version 3                                 |
+| `stream.rs`    | Chunked encryption, format versions 3 and 4                          |
+| `kdf.rs`       | Keys from passphrases, with Argon2id in locked memory                |
 | `legacy.rs`    | Decrypting format versions 1 and 2                                   |
 | `meta.rs`      | The stored metadata                                                  |
 | `files.rs`     | Checking input, reading back from disk, writing output safely        |
@@ -838,8 +862,9 @@ program for `encryptor update` to run.
 
 It uses the RustCrypto
 [`aes-gcm`](https://crates.io/crates/aes-gcm),
-[`hkdf`](https://crates.io/crates/hkdf) and
-[`sha2`](https://crates.io/crates/sha2) crates,
+[`hkdf`](https://crates.io/crates/hkdf),
+[`sha2`](https://crates.io/crates/sha2) and
+[`argon2`](https://crates.io/crates/argon2) crates,
 [`zeroize`](https://crates.io/crates/zeroize) for wiping secrets,
 [`getrandom`](https://crates.io/crates/getrandom) for randomness,
 [`md-5`](https://crates.io/crates/md-5) for finding thumbnails by name and

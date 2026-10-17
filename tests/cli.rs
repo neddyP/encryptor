@@ -277,8 +277,8 @@ fn still_takes_piped_answers_but_says_they_are_going() {
     }
     let dir = Scratch::new("piped");
     dir.write("old.txt", b"old style");
-    // Generate a key, save it, don't print it, encrypt.
-    let run = dir.run(&["encrypt", "old.txt"], "y\ny\nn\ny\n");
+    // A key, generated, saved, not printed, then encrypt.
+    let run = dir.run(&["encrypt", "old.txt"], "k\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains(PIPE_NOTE), "{}", run.stderr());
     assert!(dir.exists("old.txt.enc") && dir.exists(".local/share/encryptor/keys/old.txt.key"));
@@ -470,7 +470,7 @@ fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
     }
     let dir = Scratch::new("keys-folder");
     dir.write("a.txt", b"a");
-    let run = dir.run(&["encrypt", "a.txt"], "y\ny\nn\ny\n");
+    let run = dir.run(&["encrypt", "a.txt"], "k\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains("Key saved as: ~/.local/share/encryptor/keys/a.txt.key"), "{}", run.stderr());
     let keys = dir.path(".local/share/encryptor/keys");
@@ -483,4 +483,48 @@ fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
     let run = dir.run(&["encrypt", "b.txt", "--new-key", "b.key", "-y", "-q"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains("is in the same folder as the encrypted file"), "{}", run.stderr());
+}
+
+#[test]
+fn encrypts_with_a_passphrase() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("passphrase");
+    let phrase = "violet anchor quietly folds";
+    dir.write("note.txt", b"meet at noon");
+    dir.write(".bash_history", format!("ls\necho '{phrase}' > /dev/null\nECHO '{}'\n", phrase.to_uppercase()).as_bytes());
+
+    let run = dir.run(&["encrypt", "note.txt"], &format!("p\n{phrase}\n{phrase}\ny\n"));
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("from your passphrase with Argon2id"), "{}", run.stdout());
+    let file = dir.read("note.txt.enc");
+    assert_eq!(&file[..5], b"AGCM\x04", "a passphrase's file is format 4");
+    assert!(!dir.exists(".local/share/encryptor/keys"), "nothing to save for a passphrase");
+    // Removed from history exactly as typed, and not in other capitals.
+    assert_eq!(dir.read(".bash_history"), format!("ls\nECHO '{}'\n", phrase.to_uppercase()).as_bytes());
+
+    let run = dir.run(&["decrypt", "note.txt.enc"], "violet anchor quietly fold\ny\n");
+    assert_eq!(run.code(), 3, "{}", run.stderr());
+    assert!(run.stderr().contains("wrong passphrase"), "{}", run.stderr());
+    assert!(!dir.exists("note.txt"));
+    assert_eq!(dir.run(&["decrypt", "note.txt.enc", "--key-file", "x.key", "-y"], "").code(), 2);
+
+    let run = dir.run(&["decrypt", "note.txt.enc"], &format!("{phrase}\ny\n"));
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(dir.read("note.txt"), b"meet at noon");
+
+}
+
+#[test]
+fn refuses_a_short_passphrase() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("short-passphrase");
+    dir.write("a.txt", b"a");
+    let run = dir.run(&["encrypt", "a.txt"], "p\nshort\nshort\nshort\n");
+    assert_eq!(run.code(), 3, "{}", run.stderr());
+    assert!(run.stderr().contains("too short: a passphrase needs at least 12 characters"), "{}", run.stderr());
+    assert!(dir.exists("a.txt") && !dir.exists("a.txt.enc"));
 }

@@ -1,7 +1,7 @@
 //! The view command: an encrypted file decrypted into locked memory and shown
 //! on a screen of its own until Enter, then erased from the screen. The user
 //! then keeps its key, which leaves the file as it was, or encrypts it again
-//! where it is with a new key. The decrypted file is only ever
+//! where it is with a new key or passphrase. The decrypted file is only ever
 //! in locked memory and on the terminal: if anything the plaintext would go
 //! in can't be locked, the run stops before putting it there. The encrypted
 //! file is only replaced once the new one has been read back and checked.
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use crate::cli::Options;
-use crate::decrypt::{self, Encrypted};
+use crate::decrypt::{self, Encrypted, Unlocked};
 use crate::error::{Error, Result};
 use crate::explain::{self, Action};
 use crate::files::{self, PartFile};
@@ -20,7 +20,7 @@ use crate::keys::{self, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, choose, confirm, safe_path};
-use crate::{KEY_LEN, encrypt, history, pager, protect, recording, session, stream, timestamps};
+use crate::{encrypt, history, pager, protect, recording, session, stream, timestamps};
 
 /// Locked memory needed beyond the file itself: the stack, the chunk being
 /// decrypted, the screen being drawn, the key and the answers typed.
@@ -78,12 +78,11 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let name = PathBuf::from(input.file_name().unwrap_or_default());
     let plain_name = files::decrypted_path(&name);
 
-    let (key, key_file) = decrypt::key(options, "encryptor view", &plain_name)?;
-    history::clean(Some(&key));
+    let unlocked = decrypt::key(options, "encryptor view", &plain_name, &encrypted)?;
     // Looked for before the file is decrypted, as looking can start other
     // programs, so none is started while the plaintext is in memory.
     let recorders = recording::scan();
-    let (metadata, contents) = decrypt_to_memory(encrypted, &key, &input, key_file.as_deref())?;
+    let (metadata, contents) = decrypt_to_memory(encrypted, &unlocked, &input)?;
 
     eprintln!("\n{}", explain::BEFORE_VIEWING);
     // Only someone at the keyboard can agree to this, as with printing a key.
@@ -110,9 +109,10 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
 
     // Encrypted again with the same key, it would open just as it does now,
     // so it's only rewritten for a new one.
-    let same = match &key_file {
-        Some(path) => format!("the same key, from {}", safe_path(path)),
-        None => "the same key you entered".into(),
+    let same = match (&unlocked.key_file, unlocked.passphrase) {
+        (_, true) => "the same passphrase".to_string(),
+        (Some(path), false) => format!("the same key, from {}", safe_path(path)),
+        (None, false) => "the same key you entered".into(),
     };
     eprintln!();
     if let Err(e) = files::can_create(&input) {
@@ -126,16 +126,17 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     }
     eprintln!("Keep its key, or encrypt it again with a new one:");
     eprintln!("  s  keep {same}, and leave the file as it was");
-    eprintln!("  n  a new key, replacing {}", safe_path(&input));
+    eprintln!("  n  a new key or passphrase, replacing {}", safe_path(&input));
     if choose("Same key or a new one?", &["same", "new"])? == "same" {
         eprintln!("Left as it was: {} still opens with {same}.", safe_path(&input));
         return Ok(());
     }
-    let old = match &key_file {
-        Some(path) => format!("The old key file, {},", safe_path(path)),
-        None => "The old key".into(),
+    let old = match (&unlocked.key_file, unlocked.passphrase) {
+        (_, true) => "The old passphrase".to_string(),
+        (Some(path), false) => format!("The old key file, {},", safe_path(path)),
+        (None, false) => "The old key".into(),
     };
-    drop(key);
+    drop(unlocked);
     reencrypt(Viewed { input, plain_name, contents, metadata, shown }, &old, options)
 }
 
@@ -143,34 +144,32 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
 /// dropped.
 fn decrypt_to_memory(
     encrypted: Encrypted,
-    key: &[u8; KEY_LEN],
+    unlocked: &Unlocked,
     input: &Path,
-    key_file: Option<&Path>,
 ) -> Result<(Option<Metadata>, Zeroizing<Vec<u8>>)> {
     let Encrypted { mut source, start, version, len: checked } = encrypted;
-    if version != stream::VERSION {
-        return decrypt::whole(key, input, key_file);
+    if version < stream::VERSION {
+        return decrypt::whole(&unlocked.key, input, unlocked.key_file.as_deref());
     }
-    let header: [u8; stream::HEADER_LEN] = start[..].try_into().expect("a version 3 file this long has a whole header");
     let read_error = |e| Error::File(explain::file(Action::Read, input, &e));
     // Its size was checked against the memory there is to lock.
     let len = source.metadata().map_err(read_error)?.len();
     if len != checked {
         return Err(Error::File(explain::changed_while_reading(input)));
     }
-    let body_len = len.saturating_sub(stream::HEADER_LEN as u64);
+    let body_len = len.saturating_sub(start.len() as u64);
     // Allocated at the most the contents could be, so it never grows and
     // leaves copies behind.
     let mut contents = files::secret_buffer(body_len)?;
     let mut rest = &mut contents[..];
-    let opened = stream::decrypt(key, &header, &mut source, body_len, &mut rest, &mut |_| {})
-        .map_err(|e| explain::stream_failure(e, input, input, key_file))?;
+    let opened = stream::decrypt(&unlocked.key, &start, &mut source, body_len, &mut rest, &mut |_| {})
+        .map_err(|e| decrypt::failure(e, input, input, unlocked))?;
     contents.truncate(opened.len as usize);
     Ok((Some(opened.metadata), contents))
 }
 
-/// Encrypts the viewed file again where it is, with a new key chosen from
-/// scratch, as encrypt asks for one. The new file is read back
+/// Encrypts the viewed file again where it is, with a new key or passphrase
+/// chosen from scratch, as encrypt asks for one. The new file is read back
 /// from the disk before it replaces the old. `old` names what no longer opens
 /// it, for the message afterwards.
 fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
@@ -183,8 +182,10 @@ fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
         std::env::current_dir().unwrap_or_default(),
     ]);
     let mut new_key_file = UnusedKeyFile::default();
-    let (key, source) = keys::establish(&viewed.plain_name, &mut new_key_file, &Options::default())?;
-    let history = history::clean(Some(&key));
+    let (secret, source) = keys::establish(&viewed.plain_name, &mut new_key_file, &Options::default())?;
+    let history = history::clean(Some(secret.held()));
+    let header = stream::header(secret.kdf()).map_err(|e| explain::stream_failure(e, input, input, None))?;
+    let key = secret.key_for(&header)?;
 
     let metadata = viewed.metadata.unwrap_or_default();
     let meta_len = metadata.encoded_len();
@@ -192,7 +193,7 @@ fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
     metadata.encode(&mut encoded);
     let len = viewed.contents.len() as u64;
     let mut out = PartFile::create(input, true)?;
-    let sealed = stream::encrypt(&key, &encoded, &mut &viewed.contents[..], len, &mut out, &mut |_| {})
+    let sealed = stream::encrypt(&key, &header, &encoded, &mut &viewed.contents[..], len, &mut out, &mut |_| {})
         .map_err(|e| explain::stream_failure(e, input, input, None))?;
     drop(encoded);
     if let Err(e) = encrypt::verify(&key, out.flushed()?, len, &sealed.hash) {
@@ -220,7 +221,7 @@ fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
         return Ok(());
     }
 
-    let overhead = stream::HEADER_LEN + meta_len + sealed.chunks as usize * stream::TAG_LEN;
+    let overhead = header.len() + meta_len + sealed.chunks as usize * stream::TAG_LEN;
     let stored = match metadata.summary() {
         summary if summary.is_empty() => "none: the file viewed had none stored".to_string(),
         summary => format!("stored encrypted: {summary}"),

@@ -93,25 +93,39 @@ fn describe(cleaned: &[PathBuf], shown: impl Fn(&Path) -> String) -> Vec<String>
     names
 }
 
-/// Removes every entry holding `key`, if one is given, and every entry that
-/// ran this tool, from each shell history file, and describes what was done.
-pub fn clean(key: Option<&[u8; KEY_LEN]>) -> String {
+/// A secret that entries holding it are removed for, in case it was ever
+/// typed or pasted into a command.
+pub enum Secret<'a> {
+    /// Found as its 64 hex characters, in either case.
+    Key(&'a [u8; KEY_LEN]),
+    /// Found exactly as typed.
+    Passphrase(&'a [u8]),
+}
+
+/// Removes every entry holding `secret`, if one is given, and every entry
+/// that ran this tool, from each shell history file, and describes what was
+/// done.
+pub fn clean(secret: Option<Secret>) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let shown = |path: &Path| match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) => format!("~/{}", safe_path(rest)),
         None => safe_path(path),
     };
     let mut hex = Zeroizing::new([0u8; 2 * KEY_LEN]);
-    if let Some(key) = key {
-        hex::encode_to_slice(key, &mut hex[..]).expect("a 32-byte key is 64 hex characters");
-    }
-    let hex = key.map(|_| &hex[..]);
+    let (needle, what) = match secret {
+        Some(Secret::Key(key)) => {
+            hex::encode_to_slice(key, &mut hex[..]).expect("a 32-byte key is 64 hex characters");
+            (Some(Needle { bytes: &hex[..], any_case: true }), "the key")
+        }
+        Some(Secret::Passphrase(passphrase)) => (Some(Needle { bytes: passphrase, any_case: false }), "the passphrase"),
+        None => (None, "the key"),
+    };
 
     let mut total = Removed::default();
     let mut cleaned = Vec::new();
     let mut unreadable = Vec::new();
     for path in files() {
-        match clean_file(&path, hex) {
+        match clean_file(&path, needle.as_ref()) {
             Ok(removed) if removed.any() => {
                 total.key += removed.key;
                 total.runs += removed.runs;
@@ -122,11 +136,11 @@ pub fn clean(key: Option<&[u8; KEY_LEN]>) -> String {
         }
     }
     let mut status = match (total.key, total.runs) {
-        (0, 0) if key.is_some() => "no entries held the key or ran this tool".to_string(),
+        (0, 0) if needle.is_some() => format!("no entries held {what} or ran this tool"),
         (0, 0) => "no entries ran this tool".to_string(),
         (0, ran) => format!("removed {} that ran this tool", entries(ran)),
-        (held, 0) => format!("removed {} holding the key", entries(held)),
-        (held, ran) => format!("removed {} holding the key and {ran} that ran this tool", entries(held)),
+        (held, 0) => format!("removed {} holding {what}", entries(held)),
+        (held, ran) => format!("removed {} holding {what} and {ran} that ran this tool", entries(held)),
     };
     if !cleaned.is_empty() {
         status.push_str(&format!(", from {}", describe(&cleaned, shown).join(", ")));
@@ -156,7 +170,20 @@ impl Removed {
 
 /// Removes the entries holding `hex` or running this tool from one history
 /// file. A missing file has none.
-fn clean_file(path: &Path, hex: Option<&[u8]>) -> io::Result<Removed> {
+/// What entries are removed for holding.
+struct Needle<'a> {
+    bytes: &'a [u8],
+    any_case: bool,
+}
+
+impl Needle<'_> {
+    fn in_entry(&self, entry: &[u8]) -> bool {
+        let found = |w: &[u8]| if self.any_case { w.eq_ignore_ascii_case(self.bytes) } else { w == self.bytes };
+        !self.bytes.is_empty() && entry.windows(self.bytes.len()).any(found)
+    }
+}
+
+fn clean_file(path: &Path, needle: Option<&Needle>) -> io::Result<Removed> {
     let file = match OpenOptions::new().read(true).write(true).open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Removed::default()),
@@ -170,7 +197,7 @@ fn clean_file(path: &Path, hex: Option<&[u8]>) -> io::Result<Removed> {
     let mut kept = Zeroizing::new(Vec::with_capacity(contents.len()));
     let mut removed = Removed::default();
     for entry in split_entries(&contents, fish) {
-        if hex.is_some_and(|hex| entry.windows(hex.len()).any(|w| w.eq_ignore_ascii_case(hex))) {
+        if needle.is_some_and(|needle| needle.in_entry(entry)) {
             removed.key += 1;
         } else if runs_tool(&command(entry, fish)) {
             removed.runs += 1;
@@ -451,7 +478,8 @@ mod tests {
         );
         fs::write(&path, &history).unwrap();
 
-        let removed = clean_file(&path, Some(hex::encode(key).as_bytes())).unwrap();
+        let hex = hex::encode(key);
+        let removed = clean_file(&path, Some(&Needle { bytes: hex.as_bytes(), any_case: true })).unwrap();
         assert_eq!((removed.key, removed.runs), (1, 1));
         assert_eq!(fs::read_to_string(&path).unwrap(), "ls\n#1700000002\ncd /\n");
 

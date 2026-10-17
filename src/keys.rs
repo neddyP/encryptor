@@ -1,5 +1,6 @@
-//! Keys: generating, saving and printing them, and reading them as typed or
-//! from a key file.
+//! Keys and passphrases: generating keys, saving them in a folder of their
+//! own and printing them, reading them as typed or from a key file, and
+//! asking for passphrases.
 
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -16,16 +17,52 @@ use crate::error::{Error, Result};
 use crate::explain::{self, Action};
 use crate::files::{self, clean_path};
 use crate::term::{self, Shown, choose, confirm, home_path, safe, safe_path};
-use crate::{protect, recording, session, wipe};
+use crate::{history, kdf, protect, recording, session, wipe};
 
 /// Key bytes live on the heap, locked in RAM, so moving the handle never
 /// copies the key and it is never swapped out. They are zeroed when dropped.
 pub type SecretKey = Box<Zeroizing<[u8; KEY_LEN]>>;
 
+/// The shortest passphrase accepted, as anyone with the file can try guesses
+/// at it for as long as they like.
+const MIN_PASSPHRASE: usize = 12;
+
+/// What a file is encrypted with.
+pub enum Secret {
+    Key(SecretKey),
+    /// Made into a key once the file's header, with its salt, exists.
+    Passphrase(Zeroizing<String>),
+}
+
+impl Secret {
+    /// The Argon2id settings a new file's header needs, for a passphrase.
+    pub fn kdf(&self) -> Option<&'static kdf::Params> {
+        matches!(self, Self::Passphrase(_)).then_some(&kdf::DEFAULT)
+    }
+
+    /// For removing from shell history.
+    pub fn held(&self) -> history::Secret<'_> {
+        match self {
+            Self::Key(key) => history::Secret::Key(key),
+            Self::Passphrase(passphrase) => history::Secret::Passphrase(passphrase.as_bytes()),
+        }
+    }
+
+    /// The key for a file with `header`: the key itself, or the passphrase's,
+    /// made with the settings and salt in the header.
+    pub fn key_for(self, header: &[u8]) -> Result<SecretKey> {
+        match self {
+            Self::Key(key) => Ok(key),
+            Self::Passphrase(passphrase) => kdf::key_for(passphrase.as_bytes(), header),
+        }
+    }
+}
+
 pub enum KeySource {
     Generated { saved_to: Option<PathBuf>, printed: Printed },
     FromFile { path: PathBuf },
     Entered,
+    Passphrase,
 }
 
 /// Whether a generated key was printed, and whether anything kept a copy.
@@ -60,13 +97,13 @@ impl Drop for UnusedKeyFile {
     }
 }
 
-/// Gets the key to encrypt `input` with: the one in `--key-file`, a new one
-/// saved to `--new-key`, or else a new random one, saved or printed as the
-/// user chooses, or one they enter.
-pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) -> Result<(SecretKey, KeySource)> {
+/// Gets what to encrypt `input` with: the key in `--key-file`, a new one
+/// saved to `--new-key`, or else a passphrase or a key, as the user chooses:
+/// a new random key, saved or printed, or one they enter.
+pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) -> Result<(Secret, KeySource)> {
     if let Some(path) = &options.key_file {
         let key = read_key_file(path)?;
-        return Ok((key, KeySource::FromFile { path: path.clone() }));
+        return Ok((Secret::Key(key), KeySource::FromFile { path: path.clone() }));
     }
     if let Some(destination) = &options.new_key {
         let key = generate()?;
@@ -78,14 +115,17 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
         if beside(&path, input) {
             eprintln!("{}", explain::key_beside_file(&path));
         }
-        return Ok((key, KeySource::Generated { saved_to: Some(path), printed: Printed::No }));
+        return Ok((Secret::Key(key), KeySource::Generated { saved_to: Some(path), printed: Printed::No }));
     }
 
+    if choose("Use a 256-bit key or a custom passphrase?", &["passphrase", "key"])? == "passphrase" {
+        return Ok((Secret::Passphrase(new_passphrase()?), KeySource::Passphrase));
+    }
     if !confirm("Generate a random 256-bit key?")? {
         let give_up = "no valid key after 3 attempts.\nRun encrypt again and answer y to have a random \
                        key generated, or enter a key of 64 characters, 0-9 and a-f.";
         let (key, _) = prompt(true, give_up)?;
-        return Ok((key, KeySource::Entered));
+        return Ok((Secret::Key(key), KeySource::Entered));
     }
 
     let key = generate()?;
@@ -115,7 +155,44 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
             }
         }
     }
-    Ok((key, KeySource::Generated { saved_to, printed }))
+    Ok((Secret::Key(key), KeySource::Generated { saved_to, printed }))
+}
+
+/// Asks for a new passphrase, twice, since it's hidden as it's typed and a
+/// typo would lock the file for good. It's kept as a key is: in locked
+/// memory, wiped when dropped.
+fn new_passphrase() -> Result<Zeroizing<String>> {
+    eprintln!("Anyone with the encrypted file can try guesses at the passphrase, so use a long");
+    eprintln!("one, such as five or more random words. Without it the file can't be decrypted.");
+    for _ in 0..3 {
+        let passphrase = term::read_secret("Enter a passphrase: ")?;
+        if passphrase.chars().count() < MIN_PASSPHRASE {
+            eprintln!("  That's too short: a passphrase needs at least {MIN_PASSPHRASE} characters.");
+            continue;
+        }
+        let again = term::read_secret("Re-enter the passphrase to confirm: ")?;
+        if *again == *passphrase {
+            return Ok(passphrase);
+        }
+        eprintln!("  The two didn't match. Type the same passphrase both times.");
+    }
+    Err(Error::KeyOrData(format!(
+        "no passphrase after 3 attempts.\nRun encrypt again, with a passphrase of at least {MIN_PASSPHRASE} \
+         characters, or choose a key."
+    )))
+}
+
+/// Asks for the passphrase a file was encrypted with. `give_up` is the error
+/// if nothing is entered three times.
+pub fn enter_passphrase(give_up: &str) -> Result<Zeroizing<String>> {
+    for _ in 0..3 {
+        let passphrase = term::read_secret("Enter the passphrase: ")?;
+        if !passphrase.is_empty() {
+            return Ok(passphrase);
+        }
+        eprintln!("  Nothing was entered.");
+    }
+    Err(Error::KeyOrData(give_up.into()))
 }
 
 /// Where generated keys are saved: `$XDG_DATA_HOME/encryptor/keys`, or
@@ -172,7 +249,6 @@ fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Resu
     Ok(path)
 }
 
-
 /// Shows the key on the terminal and erases it afterwards, or explains why it
 /// can't be shown here. If anything is recording the session, says what and
 /// asks first.
@@ -211,7 +287,7 @@ fn print(key: &[u8; KEY_LEN]) -> Result<Printed> {
 }
 
 /// Allocates a key buffer that is locked in RAM and zeroed when dropped.
-fn new_key() -> SecretKey {
+pub fn new_key() -> SecretKey {
     let key: SecretKey = Box::new(Zeroizing::new([0u8; KEY_LEN]));
     protect::lock(key.as_ptr(), KEY_LEN);
     key

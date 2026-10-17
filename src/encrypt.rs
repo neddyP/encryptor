@@ -2,7 +2,7 @@
 //! disk, then the original is destroyed with the traces left of it, unless
 //! kept, and a report printed.
 
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 use std::time::Instant;
 
@@ -14,7 +14,7 @@ use crate::keys::{self, KeySource, Printed, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe_path};
-use crate::{KEY_LEN, desktop, history, protect, session, stream, timestamps, wipe};
+use crate::{KEY_LEN, MAGIC, desktop, history, kdf, protect, session, stream, timestamps, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let input = files::file_path("encrypt", file)?;
@@ -56,13 +56,16 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     }
 
     let mut key_file = UnusedKeyFile::default();
-    let (key, source) = keys::establish(&input, &mut key_file, options)?;
-    let history = history::clean(Some(&key));
+    let (secret, source) = keys::establish(&input, &mut key_file, options)?;
+    let history = history::clean(Some(secret.held()));
 
     if !options.yes && !confirm("Encrypt using AES-256-GCM?")? {
         eprintln!("Cancelled; nothing was encrypted.");
         return Ok(());
     }
+    // A passphrase is made into a key with the new header's salt.
+    let header = stream::header(secret.kdf()).map_err(|e| explain::stream_failure(e, &input, &output, None))?;
+    let key = secret.key_for(&header)?;
 
     let started = Instant::now();
     let read_error = |e| Error::File(explain::file(Action::Read, &input, &e));
@@ -79,6 +82,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let mut progress = term::Progress::new("Encrypting", len);
     let sealed = stream::encrypt(
         &key,
+        &header,
         &encoded,
         &mut original.reader().map_err(read_error)?,
         len,
@@ -134,7 +138,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     let mut rows = vec![("Cipher", "AES-256-GCM (authenticated encryption)".to_string())];
     rows.extend(key_rows(&source));
     let tags = sealed.chunks as usize * stream::TAG_LEN;
-    let overhead = stream::HEADER_LEN + meta_len + tags;
+    let overhead = header.len() + meta_len + tags;
     rows.extend([
         ("File key", "derived with HKDF-SHA256 from the key and a random 256-bit salt".into()),
         (
@@ -147,7 +151,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             "Overhead",
             format!(
                 "{overhead} bytes ({} header + {meta_len} metadata + {tags} in tags)",
-                stream::HEADER_LEN
+                header.len()
             ),
         ),
         ("Metadata", format!("stored encrypted: {}", metadata.summary())),
@@ -183,6 +187,10 @@ pub fn key_rows(source: &KeySource) -> [(&'static str, String); 2] {
         KeySource::Entered => [
             ("Key", "256-bit, entered by you".into()),
             ("Key storage", "not stored by this tool".into()),
+        ],
+        KeySource::Passphrase => [
+            ("Key", format!("256-bit, from your passphrase with {}", kdf::DEFAULT.summary())),
+            ("Key storage", "your passphrase; not stored by this tool".into()),
         ],
     }
 }
@@ -220,15 +228,21 @@ fn key_storage(saved_to: Option<&Path>, printed: &Printed) -> String {
 pub fn verify(key: &[u8; KEY_LEN], path: &Path, len: u64, hash: &[u8; 32]) -> Result<()> {
     let read_error = |e| Error::File(explain::file(Action::Read, path, &e));
     let mut file = files::open_uncached(path).map_err(read_error)?;
-    let body_len = file.metadata().map_err(read_error)?.len().saturating_sub(stream::HEADER_LEN as u64);
-    let mut header = [0u8; stream::HEADER_LEN];
-    std::io::Read::read_exact(&mut file, &mut header).map_err(read_error)?;
+    // The version, then the rest of the header, which is longer for a
+    // passphrase.
+    let mut header = vec![0u8; MAGIC.len() + 1];
+    file.read_exact(&mut header).map_err(read_error)?;
+    header.resize(stream::header_len(header[MAGIC.len()]), 0);
+    file.read_exact(&mut header[MAGIC.len() + 1..]).map_err(read_error)?;
+    let body_len = file.metadata().map_err(read_error)?.len().saturating_sub(header.len() as u64);
     let mut progress = term::Progress::new("Verifying", body_len);
     let opened = stream::decrypt(key, &header, &mut file, body_len, &mut std::io::sink(), &mut |done| {
         progress.update(done)
     })
     .map_err(|e| match e {
-        stream::Error::Auth(n) => format!("verification failed: chunk {n} of the encrypted file didn't decrypt").into(),
+        stream::Error::Auth { chunk, .. } => {
+            format!("verification failed: chunk {chunk} of the encrypted file didn't decrypt").into()
+        }
         e => match explain::stream_failure(e, path, path, None) {
             Error::Interrupted => Error::Interrupted,
             e => format!("verification failed: {e}").into(),

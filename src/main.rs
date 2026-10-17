@@ -14,6 +14,7 @@ mod explain;
 mod files;
 mod history;
 mod home;
+mod kdf;
 mod keys;
 mod legacy;
 mod meta;
@@ -39,8 +40,9 @@ use cli::Command;
 use error::Result;
 
 const MAGIC: &[u8; 4] = b"AGCM";
-/// The newest format version, which is the one written.
-const VERSION: u8 = stream::VERSION;
+/// The newest format version read. Version 3 is written for a key, and 4
+/// for a passphrase.
+const VERSION: u8 = stream::PASSPHRASE_VERSION;
 const KEY_LEN: usize = 32;
 
 #[global_allocator]
@@ -190,7 +192,8 @@ fn choose_at_home() -> Result<Option<Command>> {
 
 fn version() -> String {
     format!(
-        "encryptor {}, writing file format {VERSION} and reading formats 1 to {VERSION}",
-        env!("CARGO_PKG_VERSION")
+        "encryptor {}, writing file format {} ({VERSION} with a passphrase) and reading formats 1 to {VERSION}",
+        env!("CARGO_PKG_VERSION"),
+        stream::VERSION
     )
 }

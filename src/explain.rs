@@ -370,6 +370,20 @@ pub fn key_beside_file(key: &Path) -> String {
     )
 }
 
+/// Argon2id's working memory, `len` bytes, couldn't be locked.
+pub fn passphrase_not_locked(len: u64) -> String {
+    let limit = match crate::protect::lock_limit() {
+        Some(limit) => format!(" This system lets a program lock {} (`ulimit -l`).", short_size(limit)),
+        None => String::new(),
+    };
+    format!(
+        "the {} a passphrase is turned into a key in couldn't be locked in memory. Written to swap, it \
+         would let guesses at the passphrase be checked cheaply, so nothing was done.{limit}\nClose \
+         other copies of encryptor and try again, or use a key instead of a passphrase.",
+        short_size(len)
+    )
+}
+
 /// A file given to decrypt that doesn't start like one this tool encrypted.
 /// `start` holds its first bytes.
 pub fn not_encrypted(path: &Path, start: &[u8]) -> String {
@@ -459,11 +473,8 @@ pub fn stream_failure(e: stream::Error, input: &Path, output: &Path, key_file: O
         stream::Error::Read(e) if e.kind() == io::ErrorKind::UnexpectedEof => Error::File(changed_while_reading(input)),
         stream::Error::Read(e) => Error::File(file(Action::Read, input, &e)),
         stream::Error::Write(e) => Error::File(file(Action::Write, output, &e)),
-        stream::Error::Auth(0) => Error::KeyOrData(wrong_key(input, key_file)),
-        stream::Error::Auth(n) => Error::KeyOrData(damaged_from(
-            input,
-            stream::HEADER_LEN as u64 + n * (stream::CHUNK + stream::TAG_LEN) as u64,
-        )),
+        stream::Error::Auth { chunk: 0, .. } => Error::KeyOrData(wrong_key(input, key_file)),
+        stream::Error::Auth { at, .. } => Error::KeyOrData(damaged_from(input, at)),
         stream::Error::Truncated => Error::KeyOrData(bad_length(input)),
         stream::Error::Metadata(e) => Error::KeyOrData(e),
         stream::Error::Memory(len) => no_memory(len).into(),
@@ -566,6 +577,21 @@ pub fn wrong_key(input: &Path, key_file: Option<&Path>) -> String {
     ));
     message
 }
+
+/// Decryption failed to authenticate with the passphrase entered.
+pub fn wrong_passphrase(input: &Path) -> String {
+    format!(
+        "authentication failed: wrong passphrase, or the file is corrupted or has been tampered with.\n\
+         Nothing was written.\n- Check the passphrase: capitals, spaces and accents all count.\n- If it's \
+         right, {} was changed or damaged after it was encrypted, for example by an incomplete copy or \
+         download. Try another copy of it.",
+        safe_path(input)
+    )
+}
+
+/// --key-file given for a file encrypted with a passphrase.
+pub const PASSPHRASE_NOT_KEY: &str = "this file was encrypted with a passphrase, not a key, so --key-file \
+     doesn't apply.\nRun it without --key-file, and enter the passphrase when asked.";
 
 // Key entry. None of these repeat what was typed, unless it's evidently a
 // path, since it may be a mistyped key.

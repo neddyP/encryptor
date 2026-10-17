@@ -110,6 +110,15 @@ pub fn lock(ptr: *const u8, len: usize) -> bool {
     true
 }
 
+/// Lets go of memory `lock` locked, once it's been wiped, so it doesn't count
+/// against the limit while it waits to be reused.
+pub fn unlock(ptr: *const u8, len: usize) {
+    // SAFETY: as in `lock`; munlock only unpins the pages.
+    if len > 0 {
+        unsafe { libc::munlock(ptr.cast(), len) };
+    }
+}
+
 /// Why there's no buffer for a secret.
 pub enum NoBuffer {
     /// There isn't this many bytes of memory free.
