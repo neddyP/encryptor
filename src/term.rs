@@ -230,6 +230,15 @@ pub fn safe_path(path: &Path) -> String {
     safe(&path.to_string_lossy())
 }
 
+/// `safe_path`, with the home folder shown as ~.
+pub fn home_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", safe_path(rest)),
+        None => safe_path(path),
+    }
+}
+
 pub fn is_direction_control(c: char) -> bool {
     matches!(
         c,

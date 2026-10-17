@@ -2,10 +2,10 @@
 //! from a key file.
 
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
@@ -14,8 +14,8 @@ use crate::KEY_LEN;
 use crate::cli::Options;
 use crate::error::{Error, Result};
 use crate::explain::{self, Action};
-use crate::files::clean_path;
-use crate::term::{self, Shown, choose, confirm, safe, safe_path};
+use crate::files::{self, clean_path};
+use crate::term::{self, Shown, choose, confirm, home_path, safe, safe_path};
 use crate::{protect, recording, session, wipe};
 
 /// Key bytes live on the heap, locked in RAM, so moving the handle never
@@ -75,6 +75,9 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
             false => write_key_file_at(&key, destination)?,
         };
         key_file.0 = Some(path.clone());
+        if beside(&path, input) {
+            eprintln!("{}", explain::key_beside_file(&path));
+        }
         return Ok((key, KeySource::Generated { saved_to: Some(path), printed: Printed::No }));
     }
 
@@ -89,7 +92,8 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
     eprintln!("Key generated (not displayed).");
 
     let mut saved_to = None;
-    if confirm("Save the key to a file in the current folder?")? {
+    let place = folder().map_or_else(|| "your keys folder".into(), |dir| home_path(&dir));
+    if confirm(&format!("Save the key to a file in {place}?"))? {
         saved_to = Some(save(&key, input, key_file)?);
     }
     let mut printed = if confirm("Print the key?")? { print(&key)? } else { Printed::No };
@@ -114,18 +118,60 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
     Ok((key, KeySource::Generated { saved_to, printed }))
 }
 
-/// Saves the key in the working directory, tells the user where, and hands
-/// the file to `key_file` to shred if encryption doesn't complete.
+/// Where generated keys are saved: `$XDG_DATA_HOME/encryptor/keys`, or
+/// `~/.local/share/encryptor/keys`. It's away from the encrypted files, so
+/// a copy of their folder, a backup or a synced folder doesn't carry the keys
+/// with it, and only the user can open it.
+pub fn folder() -> Option<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(data.join("encryptor/keys"))
+}
+
+/// The keys folder, made if it isn't there yet, and checked to be a folder of
+/// the user's own that only they can open.
+fn open_folder() -> Result<PathBuf> {
+    let dir = folder().ok_or_else(|| Error::File(explain::NO_KEYS_FOLDER.into()))?;
+    let create_error = |e: io::Error| Error::File(explain::file(Action::Create, &dir, &e));
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent).map_err(create_error)?;
+    }
+    match DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(create_error(e)),
+    }
+    let meta = fs::symlink_metadata(&dir).map_err(create_error)?;
+    // SAFETY: geteuid has no arguments and can't fail.
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(Error::File(explain::keys_folder_not_own(&dir)));
+    }
+    if meta.mode() & 0o077 != 0 {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(create_error)?;
+    }
+    Ok(dir)
+}
+
+/// Whether the key file at `key` is in the same folder as `input`, where the
+/// encrypted file goes.
+fn beside(key: &Path, input: &Path) -> bool {
+    let folder = |path: &Path| fs::canonicalize(files::folder(path)).ok();
+    folder(key).is_some_and(|dir| Some(dir) == folder(input))
+}
+
+/// Saves the key in the keys folder, tells the user where, and hands the file
+/// to `key_file` to shred if encryption doesn't complete.
 fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Result<PathBuf> {
-    let dir = std::env::current_dir().map_err(|e| Error::File(explain::no_working_folder(&e)))?;
-    let path = write_key_file(key, input, &dir)?;
+    let path = write_key_file(key, input, &open_folder()?)?;
     key_file.0 = Some(path.clone());
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    eprintln!("Key saved as: {}", safe(&name));
-    session::remember(format!("Key saved as: {}", safe(&name)));
+    eprintln!("Key saved as: {}", home_path(&path));
+    session::remember(format!("Key saved as: {}", home_path(&path)));
     eprintln!("Keep it safe: anyone with it can decrypt the file, and without it no one can.");
     Ok(path)
 }
+
 
 /// Shows the key on the terminal and erases it afterwards, or explains why it
 /// can't be shown here. If anything is recording the session, says what and
@@ -304,18 +350,34 @@ fn parse(input: &str) -> std::result::Result<(SecretKey, Option<PathBuf>), Strin
     }
 
     let path_bytes = Zeroizing::new(clean_path(input).into_os_string().into_vec());
-    let path = Path::new(OsStr::from_bytes(&path_bytes));
-    let file = File::open(path).map_err(|e| explain::not_a_key(input, path, &e))?;
-    let key = key_from_file(path, file).map_err(|e| e.to_string())?;
-    Ok((key, Some(path.to_path_buf())))
+    let (path, file) =
+        find(Path::new(OsStr::from_bytes(&path_bytes))).map_err(|(path, e)| explain::not_a_key(input, &path, &e))?;
+    let key = key_from_file(&path, file).map_err(|e| e.to_string())?;
+    Ok((key, Some(path)))
+}
+
+/// Opens a key file: `path`, or for a bare name not found here, the file of
+/// that name in the keys folder, where new keys are saved.
+fn find(path: &Path) -> std::result::Result<(PathBuf, File), (PathBuf, io::Error)> {
+    match File::open(path) {
+        Ok(file) => Ok((path.to_path_buf(), file)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound && files::parent_dir(path).as_os_str().is_empty() => {
+            let saved = folder().map(|dir| dir.join(path)).filter(|saved| saved.is_file());
+            match saved {
+                Some(saved) => File::open(&saved).map(|file| (saved.clone(), file)).map_err(|e| (saved, e)),
+                None => Err((path.to_path_buf(), e)),
+            }
+        }
+        Err(e) => Err((path.to_path_buf(), e)),
+    }
 }
 
 /// The key in a key file: 32 raw bytes, or 64 hex characters as printed, with
 /// any whitespace around them. It may be a pipe, as with
 /// `--key-file <(pass show keys/report)`, so its size isn't known in advance.
 pub fn read_key_file(path: &Path) -> Result<SecretKey> {
-    let file = File::open(path).map_err(|e| Error::File(explain::file(Action::Read, path, &e)))?;
-    key_from_file(path, file)
+    let (path, file) = find(path).map_err(|(path, e)| Error::File(explain::file(Action::Read, &path, &e)))?;
+    key_from_file(&path, file)
 }
 
 fn key_from_file(path: &Path, mut file: File) -> Result<SecretKey> {

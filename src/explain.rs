@@ -376,6 +376,28 @@ pub fn no_free_name(path: &Path) -> String {
     )
 }
 
+/// HOME isn't set, so there's no keys folder.
+pub const NO_KEYS_FOLDER: &str = "HOME isn't set, so there's no keys folder to save the key in.\nGive one with \
+     --new-key PATH, or set HOME and try again.";
+
+/// The keys folder exists but isn't a folder of the user's own.
+pub fn keys_folder_not_own(dir: &Path) -> String {
+    format!(
+        "{} isn't a folder of your own, so the key wasn't saved there.\nMove it aside and try again, or give \
+         another place with --new-key PATH.",
+        safe_path(dir)
+    )
+}
+
+/// A key saved with --new-key in the folder the encrypted file goes in.
+pub fn key_beside_file(key: &Path) -> String {
+    format!(
+        "WARNING: the key, {}, is in the same folder as the encrypted file, so anyone who gets a copy of \
+         the folder gets both. Keep it somewhere else.",
+        safe_path(key)
+    )
+}
+
 /// A file given to decrypt that doesn't start like one this tool encrypted.
 /// `start` holds its first bytes.
 pub fn not_encrypted(path: &Path, start: &[u8]) -> String {
@@ -592,11 +614,15 @@ pub fn hex_key_length(n: usize) -> String {
 pub fn not_a_key(input: &str, path: &Path, e: &io::Error) -> String {
     if input.contains(['/', '.', '~']) {
         return match e.kind() {
-            io::ErrorKind::NotFound => format!(
-                "there's no key file at {}. Key files are saved as FILE.key in the folder encrypt was run in; \
-                 `ls *.key` lists the ones in this folder.",
-                safe_path(path)
-            ),
+            io::ErrorKind::NotFound => {
+                let keys = crate::keys::folder();
+                let keys = keys.map_or_else(|| "the keys folder".into(), |dir| crate::term::home_path(&dir));
+                format!(
+                    "there's no key file at {}, here or in {keys}, where new keys are saved. `ls {keys}` lists \
+                     the keys there.",
+                    safe_path(path)
+                )
+            }
             _ => file(Action::Read, path, e).replace('\n', " "),
         };
     }

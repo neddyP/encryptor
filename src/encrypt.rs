@@ -24,12 +24,13 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     if output.exists() {
         return Err(Error::File(explain::output_exists(&output)));
     }
-    // The folders this writes in (for the output, the original and a saved key
-    // or summary) have their modified times set back when this returns, so
+    // The folders this writes in (for the output, the original, a saved key
+    // and a summary) have their modified times set back when this returns, so
     // they don't show when the run changed them.
     let _dir_times = timestamps::DirTimes::capture([
         files::parent_dir(&input),
         files::parent_dir(&output),
+        keys::folder().unwrap_or_default(),
         std::env::current_dir().unwrap_or_default(),
     ]);
     // Problems found now save asking for a key that can't be used. Unless

@@ -281,8 +281,9 @@ fn still_takes_piped_answers_but_says_they_are_going() {
     let run = dir.run(&["encrypt", "old.txt"], "y\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains(PIPE_NOTE), "{}", run.stderr());
-    assert!(dir.exists("old.txt.enc") && dir.exists("old.txt.key"));
+    assert!(dir.exists("old.txt.enc") && dir.exists(".local/share/encryptor/keys/old.txt.key"));
 
+    // A key file's bare name is found in the keys folder.
     let run = dir.run(&["decrypt", "old.txt.enc"], "old.txt.key\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(dir.read("old.txt"), b"old style");
@@ -459,4 +460,27 @@ fn views_only_with_someone_at_the_keyboard() {
     assert_eq!(dir.run(&["view", "secret.txt.enc", "--yes"], "").code(), 2, "view takes no --yes");
     assert_eq!(dir.run(&["encrypt", "-v", "secret.txt.enc"], "").code(), 2);
     assert!(!dir.exists("secret.txt"), "saved decrypted");
+}
+
+#[test]
+fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
+    use std::os::unix::fs::PermissionsExt;
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("keys-folder");
+    dir.write("a.txt", b"a");
+    let run = dir.run(&["encrypt", "a.txt"], "y\ny\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("Key saved as: ~/.local/share/encryptor/keys/a.txt.key"), "{}", run.stderr());
+    let keys = dir.path(".local/share/encryptor/keys");
+    assert_eq!(fs::metadata(&keys).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::metadata(keys.join("a.txt.key")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(!dir.exists("a.txt.key"), "a key beside the file");
+
+    // Saved beside the file on purpose, it's allowed, with a warning.
+    dir.write("b.txt", b"b");
+    let run = dir.run(&["encrypt", "b.txt", "--new-key", "b.key", "-y", "-q"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("is in the same folder as the encrypted file"), "{}", run.stderr());
 }
