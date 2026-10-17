@@ -115,6 +115,22 @@ fn runnable() -> bool {
     how_to_run().is_some()
 }
 
+/// Whether the binary may lock the memory a passphrase is made into a key in,
+/// as it raises its limit as far as the system allows. Some build containers
+/// allow only 64 KiB, and the binary refuses passphrases there.
+fn can_lock_a_passphrase() -> bool {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: reads this process's limit into a valid local.
+    let known = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } == 0;
+    // SAFETY: geteuid has no arguments and can't fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    let enough = root || !known || limit.rlim_max == libc::RLIM_INFINITY || limit.rlim_max as u64 >= 8 << 20;
+    if !enough {
+        eprintln!("skipping: this system lets a program lock too little memory for a passphrase (ulimit -l)");
+    }
+    enough
+}
+
 struct Run(Output);
 
 impl Run {
@@ -487,7 +503,7 @@ fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
 
 #[test]
 fn encrypts_with_a_passphrase() {
-    if !runnable() {
+    if !runnable() || !can_lock_a_passphrase() {
         return;
     }
     let dir = Scratch::new("passphrase");

@@ -102,8 +102,22 @@ mod tests {
 
     const SALT: [u8; 32] = [7; 32];
 
+    /// Whether this system lets these tests lock their Argon2id memory, as
+    /// well as what the tests running alongside lock. Some build containers
+    /// allow only 64 KiB.
+    fn can_lock() -> bool {
+        let enough = protect::lock_limit().is_none_or(|limit| limit >= 1 << 20);
+        if !enough {
+            eprintln!("skipping: this system lets a program lock too little memory (ulimit -l)");
+        }
+        enough
+    }
+
     #[test]
     fn makes_the_same_key_from_the_same_passphrase_only() {
+        if !can_lock() {
+            return;
+        }
         let small = Params { memory_kib: 64, passes: 1, lanes: 1 };
         let key = derive(b"correct horse battery staple", &small, &SALT).unwrap();
         assert_eq!(**key, **derive(b"correct horse battery staple", &small, &SALT).unwrap());
@@ -115,6 +129,9 @@ mod tests {
 
     #[test]
     fn matches_the_reference_argon2id() {
+        if !can_lock() {
+            return;
+        }
         // Made with Python's `cryptography` package: Argon2id version 19,
         // 32 KiB, 3 passes, 4 lanes, a password of 32 bytes of 1 and a salt
         // of 16 bytes of 2.
