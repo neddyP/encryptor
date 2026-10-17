@@ -91,6 +91,20 @@ pub fn names(recorders: &[Recorder]) -> String {
     }
 }
 
+/// Before something secret is shown: lists the `recorders` found under a
+/// warning, and returns their names for a sentence, or `None` if none were.
+pub fn warn(recorders: &[Recorder]) -> Option<String> {
+    if recorders.is_empty() {
+        return None;
+    }
+    eprintln!();
+    eprintln!("WARNING: something is recording or sharing this terminal session:");
+    for recorder in recorders {
+        eprint!("{recorder}");
+    }
+    Some(names(recorders))
+}
+
 /// Everything found that would capture what this program shows on its
 /// terminal. Empty if nothing was found.
 pub fn scan() -> Vec<Recorder> {

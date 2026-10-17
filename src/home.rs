@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::term::RawMode;
+use crate::term::{self, RawMode};
 use crate::{protect, session};
 
 /// A padlock beside the name, as figlet's standard font draws it.
@@ -55,7 +55,7 @@ pub fn show(usage: &str, version: &str) -> Result<Choice> {
             write(&frame(&lines, top, rows, cols, color))?;
             shown = Some((top, rows, cols));
         }
-        let Some(key) = read_key(&mut next_byte)? else { continue };
+        let Some(key) = read_key(&mut |wait| term::poll_byte(libc::STDIN_FILENO, wait))? else { continue };
         let body = body_rows(rows);
         top = match key {
             Key::Encrypt => return Ok(Choice::Encrypt),
@@ -147,82 +147,20 @@ enum Key {
 /// given for each. `None` if nothing was pressed in time, so the screen can
 /// check whether the window was resized.
 fn read_key(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Option<Key>> {
-    let Some(byte) = next(Duration::from_millis(250))? else { return Ok(None) };
-    Ok(Some(match byte {
-        b'e' | b'E' => Key::Encrypt,
-        b'd' | b'D' => Key::Decrypt,
-        // q, Ctrl-C and Ctrl-D.
-        b'q' | b'Q' | 0x03 | 0x04 => Key::Quit,
-        b'k' => Key::Up,
-        b'j' => Key::Down,
-        b'b' => Key::PageUp,
-        b' ' => Key::PageDown,
-        b'g' => Key::Home,
-        b'G' => Key::End,
-        0x1b => escape_sequence(next)?,
+    let Some(key) = term::read_key(next)? else { return Ok(None) };
+    Ok(Some(match key {
+        term::Key::Byte(b'e' | b'E') => Key::Encrypt,
+        term::Key::Byte(b'd' | b'D') => Key::Decrypt,
+        // q, Escape on its own, Ctrl-C and Ctrl-D.
+        term::Key::Byte(b'q' | b'Q' | 0x03 | 0x04) | term::Key::Escape => Key::Quit,
+        term::Key::Byte(b'k') | term::Key::Up => Key::Up,
+        term::Key::Byte(b'j') | term::Key::Down => Key::Down,
+        term::Key::Byte(b'b') | term::Key::PageUp => Key::PageUp,
+        term::Key::Byte(b' ') | term::Key::PageDown => Key::PageDown,
+        term::Key::Byte(b'g') | term::Key::Home => Key::Home,
+        term::Key::Byte(b'G') | term::Key::End => Key::End,
         _ => Key::Other,
     }))
-}
-
-/// The rest of a key that starts with Escape. Arrows and paging keys send a
-/// sequence straight away; Escape on its own, with nothing after it, quits.
-fn escape_sequence(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Key> {
-    let soon = Duration::from_millis(50);
-    match next(soon)? {
-        None => return Ok(Key::Quit),
-        Some(b'[' | b'O') => {}
-        Some(_) => return Ok(Key::Other),
-    }
-    let mut number = 0u32;
-    loop {
-        return Ok(match next(soon)? {
-            Some(digit @ b'0'..=b'9') => {
-                number = number.saturating_mul(10).saturating_add(u32::from(digit - b'0'));
-                continue;
-            }
-            Some(b'A') => Key::Up,
-            Some(b'B') => Key::Down,
-            Some(b'H') => Key::Home,
-            Some(b'F') => Key::End,
-            Some(b'~') => match number {
-                5 => Key::PageUp,
-                6 => Key::PageDown,
-                1 | 7 => Key::Home,
-                4 | 8 => Key::End,
-                _ => Key::Other,
-            },
-            // The end of a sequence this screen has no use for.
-            Some(0x40..=0x7e) | None => Key::Other,
-            // Separators and modifiers, as in Ctrl+Up.
-            Some(_) => continue,
-        });
-    }
-}
-
-/// The next byte typed, waiting at most `wait`. End of input reads as Ctrl-D.
-fn next_byte(wait: Duration) -> Result<Option<u8>> {
-    let mut stdin = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
-    let millis = libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: polls one valid descriptor.
-    let ready = unsafe { libc::poll(&mut stdin, 1, millis) };
-    if ready == 0 {
-        return Ok(None);
-    }
-    let mut byte = 0u8;
-    // SAFETY: reads at most one byte into a valid local.
-    let got = if ready > 0 { unsafe { libc::read(libc::STDIN_FILENO, (&raw mut byte).cast(), 1) } } else { -1 };
-    match got {
-        1 => Ok(Some(byte)),
-        0 => Ok(Some(0x04)),
-        _ => {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                protect::check()?;
-                return Ok(None);
-            }
-            Err(Error::from(format!("cannot read input: {e}")))
-        }
-    }
 }
 
 /// Rows and columns of the terminal, or the classic 24 by 80 if unknown.

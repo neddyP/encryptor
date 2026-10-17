@@ -3,7 +3,7 @@
 //! shown only on the terminal's alternate screen, and escaping of untrusted
 //! text before it is printed.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
@@ -85,12 +85,9 @@ pub enum Shown {
 /// Everything is written straight to the terminal device, so the key never
 /// goes through standard output and can't end up in a redirected file.
 pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
-    let term = std::env::var("TERM").unwrap_or_default();
-    if term.is_empty() || term == "dumb" {
-        return Ok(Shown::Unavailable("the terminal type (TERM) is unset or \"dumb\", so it couldn't be erased afterwards"));
-    }
-    let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
-        return Ok(Shown::Unavailable("there's no terminal to show it on, as the tool isn't running in a terminal window"));
+    let mut tty = match open_screen() {
+        Ok(tty) => tty,
+        Err(reason) => return Ok(Shown::Unavailable(reason)),
     };
 
     let mut hex = Zeroizing::new([0u8; 64]);
@@ -118,8 +115,8 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
             )
         })
         // The prompt on the bottom row, when there's room below the key.
-        .and_then(|()| match rows(fd) {
-            Some(rows) if rows > 9 => tty.write_all(format!("\x1b[{rows};1H").as_bytes()),
+        .and_then(|()| match size(fd) {
+            Some((rows, _)) if rows > 9 => tty.write_all(format!("\x1b[{rows};1H").as_bytes()),
             _ => Ok(()),
         })
         .and_then(|()| tty.write_all(b"Press Enter to erase the key and go back."))
@@ -135,13 +132,27 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
     result.map(|()| Shown::Yes)
 }
 
-/// Rows of the terminal on `fd`, if it says.
-fn rows(fd: libc::c_int) -> Option<u16> {
+/// The terminal to show a secret on, opened directly rather than through
+/// standard output, or why there isn't one it could be erased from.
+pub fn open_screen() -> std::result::Result<File, &'static str> {
+    let term = std::env::var("TERM").unwrap_or_default();
+    if term.is_empty() || term == "dumb" {
+        return Err("the terminal type (TERM) is unset or \"dumb\", so it couldn't be erased afterwards");
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| "there's no terminal to show it on, as the tool isn't running in a terminal window")
+}
+
+/// Rows and columns of the terminal on `fd`, if it says.
+pub fn size(fd: libc::c_int) -> Option<(usize, usize)> {
     // SAFETY: winsize is plain data, filled in by the ioctl.
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: asks the terminal on `fd` for its size.
     let known = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0;
-    (known && size.ws_row > 0).then_some(size.ws_row)
+    (known && size.ws_row > 0 && size.ws_col > 0).then(|| (usize::from(size.ws_row), usize::from(size.ws_col)))
 }
 
 /// Waits for Enter at the terminal on standard input. Ctrl-C returns
@@ -349,6 +360,96 @@ fn wait_for_enter(fd: libc::c_int) -> Result<()> {
             }
             None => return Err("the terminal closed before Enter was pressed".into()),
             Some(_) => {}
+        }
+    }
+}
+
+/// A key pressed on a full screen: a byte as typed, or a key that sends an
+/// escape sequence.
+#[derive(Debug, PartialEq)]
+pub enum Key {
+    Byte(u8),
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    /// Escape on its own.
+    Escape,
+    /// A sequence with no use on these screens.
+    Other,
+}
+
+/// Decodes one key from the bytes `next` gives, waiting up to the time it's
+/// given for each. `None` if nothing was pressed in time, so a screen can
+/// check whether the window was resized.
+pub fn read_key(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Option<Key>> {
+    match next(Duration::from_millis(250))? {
+        None => Ok(None),
+        Some(0x1b) => escape_sequence(next).map(Some),
+        Some(byte) => Ok(Some(Key::Byte(byte))),
+    }
+}
+
+/// The rest of a key that starts with Escape. Arrows and paging keys send a
+/// sequence straight away; Escape on its own has nothing after it.
+fn escape_sequence(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Key> {
+    let soon = Duration::from_millis(50);
+    match next(soon)? {
+        None => return Ok(Key::Escape),
+        Some(b'[' | b'O') => {}
+        Some(_) => return Ok(Key::Other),
+    }
+    let mut number = 0u32;
+    loop {
+        return Ok(match next(soon)? {
+            Some(digit @ b'0'..=b'9') => {
+                number = number.saturating_mul(10).saturating_add(u32::from(digit - b'0'));
+                continue;
+            }
+            Some(b'A') => Key::Up,
+            Some(b'B') => Key::Down,
+            Some(b'H') => Key::Home,
+            Some(b'F') => Key::End,
+            Some(b'~') => match number {
+                5 => Key::PageUp,
+                6 => Key::PageDown,
+                1 | 7 => Key::Home,
+                4 | 8 => Key::End,
+                _ => Key::Other,
+            },
+            // The end of a sequence these screens have no use for.
+            Some(0x40..=0x7e) | None => Key::Other,
+            // Separators and modifiers, as in Ctrl+Up.
+            Some(_) => continue,
+        });
+    }
+}
+
+/// The next byte typed on `fd`, waiting at most `wait`. End of input reads as
+/// Ctrl-D.
+pub fn poll_byte(fd: libc::c_int, wait: Duration) -> Result<Option<u8>> {
+    let mut input = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let millis = libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: polls one valid descriptor.
+    let ready = unsafe { libc::poll(&mut input, 1, millis) };
+    if ready == 0 {
+        return Ok(None);
+    }
+    let mut byte = 0u8;
+    // SAFETY: reads at most one byte into a valid local.
+    let got = if ready > 0 { unsafe { libc::read(fd, (&raw mut byte).cast(), 1) } } else { -1 };
+    match got {
+        1 => Ok(Some(byte)),
+        0 => Ok(Some(0x04)),
+        _ => {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                protect::check()?;
+                return Ok(None);
+            }
+            Err(Error::from(format!("cannot read input: {e}")))
         }
     }
 }

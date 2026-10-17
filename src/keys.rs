@@ -132,14 +132,8 @@ fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Resu
 /// can't be shown here. If anything is recording the session, says what and
 /// asks first.
 fn print(key: &[u8; KEY_LEN]) -> Result<Printed> {
-    let recorders = recording::scan();
-    let captured_by = (!recorders.is_empty()).then(|| recording::names(&recorders));
+    let captured_by = recording::warn(&recording::scan());
     if let Some(by) = &captured_by {
-        eprintln!();
-        eprintln!("WARNING: something is recording or sharing this terminal session:");
-        for recorder in &recorders {
-            eprint!("{recorder}");
-        }
         // Only someone at the keyboard can agree to this, not an answer piped
         // in, which could be meant for another question or be `yes`.
         if !io::stdin().is_terminal() {

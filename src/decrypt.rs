@@ -1,40 +1,128 @@
 //! The decrypt command: checks, key, decryption of any format version,
 //! verification from disk, metadata restored, then a report printed.
 
+use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+use zeroize::Zeroizing;
 
 use crate::cli::Options;
 use crate::error::{Error, Result};
 use crate::explain::{self, Action};
 use crate::files::{self, PartFile, Replaced};
-use crate::keys;
+use crate::keys::{self, SecretKey};
+use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, confirm, safe, safe_path};
-use crate::{MAGIC, VERSION, history, legacy, protect, stream, timestamps, wipe};
+use crate::{KEY_LEN, MAGIC, VERSION, history, legacy, protect, stream, timestamps, wipe};
 
-pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
-    let input = files::file_path("decrypt", file)?;
-    let input_len = files::input_len("decrypt", &input)?;
+/// An encrypted file, open and checked, with its start already read.
+pub struct Encrypted {
+    /// The open file, positioned after the header of a version 3 file, which
+    /// is decrypted from this same handle.
+    pub source: File,
+    pub start: Vec<u8>,
+    pub version: u8,
+    pub len: u64,
+}
 
-    // Reject files this tool didn't produce before asking for the key, saying
-    // what they are instead where that can be told. The file stays open, and
-    // a version 3 file is decrypted from this same handle.
-    let read_error = |e| Error::File(explain::file(Action::Read, &input, &e));
-    let mut source = files::open_no_follow(&input).map_err(read_error)?;
+/// Opens the file `command` was given, rejecting files this tool didn't
+/// produce before a key is asked for, and saying what they are instead where
+/// that can be told.
+pub fn open(command: &str, input: &Path) -> Result<Encrypted> {
+    let len = files::input_len(command, input)?;
+    let read_error = |e| Error::File(explain::file(Action::Read, input, &e));
+    let mut source = files::open_no_follow(input).map_err(read_error)?;
     let mut start = Vec::with_capacity(stream::HEADER_LEN);
     (&mut source).take(stream::HEADER_LEN as u64).read_to_end(&mut start).map_err(read_error)?;
     if !start.starts_with(MAGIC) {
-        return Err(Error::File(explain::not_encrypted(&input, &start)));
+        return Err(Error::File(explain::not_encrypted(input, &start)));
     }
     let min_len = match start.get(MAGIC.len()) {
         Some(&stream::VERSION) => stream::MIN_LEN,
         _ => legacy::MIN_LEN,
     };
-    if input_len < min_len {
-        return Err(Error::KeyOrData(explain::too_short(&input, input_len, min_len)));
+    if len < min_len {
+        return Err(Error::KeyOrData(explain::too_short(input, len, min_len)));
     }
     let version = check_header(&start)?;
+    Ok(Encrypted { source, start, version, len })
+}
+
+/// The key to decrypt with, and the key file it came from: the one in
+/// `--key-file`, or else one entered. `run_again` is the command to suggest
+/// after three failed attempts, and `plain` the decrypted file's name, which
+/// the key file is usually named after.
+pub fn key(options: &Options, run_again: &str, plain: &Path) -> Result<(SecretKey, Option<PathBuf>)> {
+    if let Some(path) = &options.key_file {
+        return Ok((keys::read_key_file(path)?, Some(path.clone())));
+    }
+    let plain_name = plain.file_name().unwrap_or_default().to_string_lossy();
+    let give_up = format!(
+        "no valid key after 3 attempts.\nRun {run_again} again with this file's key: the 64 characters \
+         printed when it was encrypted, or its key file, usually {}.key.",
+        safe(&plain_name)
+    );
+    keys::prompt(false, &give_up)
+}
+
+/// Decrypts a version 1 or 2 file, which was encrypted whole, into memory.
+pub fn whole(
+    key: &[u8; KEY_LEN],
+    input: &Path,
+    key_file: Option<&Path>,
+) -> Result<(Option<Metadata>, Zeroizing<Vec<u8>>)> {
+    legacy::decrypt(key, files::read_file(input)?).map_err(|e| match e {
+        Error::AuthFailed => Error::KeyOrData(explain::wrong_key(input, key_file)),
+        Error::Message(e) => Error::KeyOrData(e),
+        e => e,
+    })
+}
+
+/// Checks that a decrypted file just put in place reads back from the disk
+/// as `hash`, removing it if not, then puts `metadata` back on it. Describes
+/// what became of the metadata, for the report.
+fn settle(output: &Path, hash: &[u8; 32], metadata: Option<Metadata>) -> Result<String> {
+    if *files::sha256_file(output)? != *hash {
+        let _ = wipe::shred(output);
+        return Err(Error::File(format!(
+            "{} didn't read back from disk as it was written, so it was removed. The encrypted \
+             file is untouched.\n{}",
+            safe_path(output),
+            explain::DISK_TROUBLE
+        )));
+    }
+    if protect::stop_requested() {
+        let _ = wipe::shred(output);
+        return Err(Error::Interrupted);
+    }
+    // Only now, since the original permissions may not let the file be read
+    // back or shredded.
+    Ok(match metadata {
+        Some(metadata) => match files::open_no_follow(output) {
+            Ok(file) => metadata.restore(&file),
+            Err(e) => format!("not restored: {}", explain::cause(Action::Read, output, &e)),
+        },
+        None => "none stored (encrypted by a version before 2.0)".into(),
+    })
+}
+
+/// What became of a file the output replaced, to follow its name in the
+/// report.
+pub fn replaced_note(replaced: Replaced) -> &'static str {
+    match replaced {
+        Replaced::Nothing => "",
+        Replaced::Shredded => "; the file it replaced was overwritten with zeros",
+        Replaced::Unlinked => "; the file it replaced was deleted but not overwritten, as other names lead to it",
+    }
+}
+
+pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
+    let input = files::file_path("decrypt", file)?;
+    let Encrypted { mut source, start, version, len: input_len } = open("decrypt", &input)?;
+    let read_error = |e| Error::File(explain::file(Action::Read, &input, &e));
 
     let output = options.output.clone().unwrap_or_else(|| files::decrypted_path(&input));
     if files::same_file(&input, &output) {
@@ -52,18 +140,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         return Err(Error::Usage(explain::needs_overwrite(&output)));
     }
 
-    let (key, key_file) = match &options.key_file {
-        Some(path) => (keys::read_key_file(path)?, Some(path.clone())),
-        None => {
-            let plain_name = output.file_name().unwrap_or_default().to_string_lossy();
-            let give_up = format!(
-                "no valid key after 3 attempts.\nRun decrypt again with this file's key: the 64 characters \
-                 printed when it was encrypted, or its key file, usually {}.key.",
-                safe(&plain_name)
-            );
-            keys::prompt(false, &give_up)?
-        }
-    };
+    let (key, key_file) = key(options, "decrypt", &output)?;
     let history = history::clean(Some(&key));
 
     if !options.yes && !confirm("Decrypt using AES-256-GCM?")? {
@@ -92,49 +169,19 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         (Some(opened.metadata), opened.len, opened.hash)
     } else {
         // Versions 1 and 2 were encrypted whole, so they are decrypted whole.
-        let (metadata, plain) = legacy::decrypt(&key, files::read_file(&input)?).map_err(|e| match e {
-            Error::AuthFailed => Error::KeyOrData(explain::wrong_key(&input, key_file.as_deref())),
-            Error::Message(e) => Error::KeyOrData(e),
-            e => e,
-        })?;
+        let (metadata, plain) = whole(&key, &input, key_file.as_deref())?;
         out.write_all(&plain).map_err(|e| Error::File(explain::file(Action::Write, &output, &e)))?;
         (metadata, plain.len() as u64, files::sha256(&plain))
     };
     drop(key);
     let replaced = out.finish()?;
-
-    if *files::sha256_file(&output)? != *plain_hash {
-        let _ = wipe::shred(&output);
-        return Err(Error::File(format!(
-            "{} didn't read back from disk as it was written, so it was removed. The encrypted \
-             file is untouched.\n{}",
-            safe_path(&output),
-            explain::DISK_TROUBLE
-        )));
-    }
-    if protect::stop_requested() {
-        let _ = wipe::shred(&output);
-        return Err(Error::Interrupted);
-    }
-    // Only now, since the original permissions may not let the file be read
-    // back or shredded.
-    let metadata_status = match metadata {
-        Some(metadata) => match files::open_no_follow(&output) {
-            Ok(file) => metadata.restore(&file),
-            Err(e) => format!("not restored: {}", explain::cause(Action::Read, &output, &e)),
-        },
-        None => "none stored (encrypted by a version before 2.0)".into(),
-    };
+    let metadata_status = settle(&output, &plain_hash, metadata)?;
     let elapsed = started.elapsed();
     if options.quiet {
         return Ok(());
     }
 
-    let replaced = match replaced {
-        Replaced::Nothing => "",
-        Replaced::Shredded => "; the file it replaced was overwritten with zeros",
-        Replaced::Unlinked => "; the file it replaced was deleted but not overwritten, as other names lead to it",
-    };
+    let replaced = replaced_note(replaced);
     let mut secrets = vec![safe_path(&input), safe_path(&output)];
     if let Some(path) = &options.key_file {
         secrets.push(safe_path(path));
