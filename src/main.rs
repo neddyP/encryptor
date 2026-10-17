@@ -52,8 +52,8 @@ encryptor - encrypt and decrypt files with AES-256-GCM
 USAGE:
     encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
     decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
-    encryptor view FILE.enc        show FILE.enc decrypted on screen, then
-                                   erase it and encrypt it again
+    encryptor view FILE.enc        show FILE.enc decrypted on screen, erase
+                                   it, then keep its key or change it
     encryptor                      show the home screen
     encryptor update               update to the latest release
 

@@ -277,20 +277,10 @@ pub fn no_memory(len: u64) -> String {
 pub const DISK_TROUBLE: &str = "This usually means a failing or full disk, a loose USB connection, or faulty \
                                 memory. Try again; if it fails again, try another disk.";
 
-pub fn no_working_folder(e: &io::Error) -> String {
-    if e.kind() == io::ErrorKind::NotFound {
-        "the current folder no longer exists: it was deleted or moved while you were in it.\n\
-         Run `cd` to go to your home folder, or cd to another folder, and try again."
-            .into()
-    } else {
-        format!("cannot find the current folder: {e}")
-    }
-}
-
 /// view run with no one at the keyboard, as in a script.
 pub fn view_needs_keyboard() -> String {
-    "view needs someone at the keyboard: it shows the file on the terminal, then asks which key to \
-     encrypt it again with.\nTo decrypt a file in a script, use decrypt:\n  decrypt FILE.enc --key-file KEY --yes"
+    "view needs someone at the keyboard: it shows the file on the terminal, then asks whether to \
+     keep its key.\nTo decrypt a file in a script, use decrypt:\n  decrypt FILE.enc --key-file KEY --yes"
         .into()
 }
 
@@ -350,31 +340,13 @@ pub const BEFORE_VIEWING: &str = "\
 Before it's shown:
   - It's held only in locked memory, never written to swap or disk, and
     shown on a screen of its own with no scrollback. When you press Enter,
-    it's erased and encrypted again.
+    it's erased, and you keep its key or encrypt it with a new one.
   - Anyone who can see your screen, or a screenshot, screen share or
     recording of it, sees the file too.
   - Selecting text copies it to your clipboard, and clipboard history
     keeps it.
   - Your terminal program holds what it shows in its own memory, which
     this tool can't wipe.";
-
-/// view can't write in the current folder, where it encrypts the file again.
-pub fn view_cant_write(output: &Path, e: &io::Error) -> String {
-    format!(
-        "view can't encrypt the file again here: {}. Nothing was decrypted.\nGo to a folder you can \
-         write in, and view it from there.",
-        cause(Action::Create, output, e)
-    )
-}
-
-/// Every name for a file encrypted again is taken.
-pub fn no_free_name(path: &Path) -> String {
-    format!(
-        "{} and 999 names like it are taken by other files, so there's nowhere to encrypt the file \
-         again. Nothing was decrypted. Move the ones you don't need, then try again.",
-        safe_path(path)
-    )
-}
 
 /// HOME isn't set, so there's no keys folder.
 pub const NO_KEYS_FOLDER: &str = "HOME isn't set, so there's no keys folder to save the key in.\nGive one with \

@@ -24,8 +24,8 @@ and `encryptor update` updates it either way; see [Install](#install).
 - **AES-256-GCM authenticated encryption.** Any change to an encrypted file,
   even a single bit, is detected and decryption refuses to proceed.
 - **View without decrypting to disk.** `encryptor view` shows a file from
-  locked memory on a screen of its own, then erases it and encrypts it
-  again, with the same key or a new one. See [Viewing](#viewing).
+  locked memory on a screen of its own, then erases it. Keeping its key
+  leaves the file as it was; a new one replaces it. See [Viewing](#viewing).
 - **Random or your own keys.** A 256-bit key from the operating system's
   secure random generator, saved in a folder only you can open, away from
   your files, printed once, or both, and never shown unless you ask. Or your
@@ -493,8 +493,7 @@ Nothing was written.
 
 ### Viewing
 
-`encryptor view` shows an encrypted file without ever decrypting it to disk,
-then encrypts it again:
+`encryptor view` shows an encrypted file without ever decrypting it to disk:
 
 ```
 $ encryptor view report.txt.enc
@@ -503,7 +502,7 @@ Enter the key (64 hex characters) or the path to its key file:
 Before it's shown:
   - It's held only in locked memory, never written to swap or disk, and
     shown on a screen of its own with no scrollback. When you press Enter,
-    it's erased and encrypted again.
+    it's erased, and you keep its key or encrypt it with a new one.
   - Anyone who can see your screen, or a screenshot, screen share or
     recording of it, sees the file too.
   - Selecting text copies it to your clipboard, and clipboard history
@@ -531,36 +530,29 @@ its own. Direction overrides, which reorder the text around them, are shown
 escaped too. A file that isn't text is shown as a hex dump.
 
 Press Enter (or `q`, or Escape) when you're done, and the screen is erased.
-Then it's encrypted again; you're only asked which key to use:
+Then you keep its key, or encrypt it again with a new one:
 
 ```
 The file was shown, then erased from the screen.
 
-Now it's encrypted again, replacing /home/you/report.txt.enc:
-  s  with the same key, from report.txt.key
-  n  with a new key
+Keep its key, or encrypt it again with a new one:
+  s  keep the same key, from report.txt.key, and leave the file as it was
+  n  a new key, replacing report.txt.enc
 Same key or a new one? [s/n]:
 ```
 
-- **`s`** encrypts it with the key you viewed it with, from its key file or
-  as you entered it.
-- **`n`** asks the key questions from scratch, as `encrypt` asks them: a new
-  random key, saved or printed, or one you enter.
+- **`s`** leaves the file exactly as it was. Encrypting it again with the
+  same key wouldn't change who can open it, so nothing is written.
+- **`n`** asks the key questions from scratch, as `encrypt` asks them: a
+  new random key, saved or printed, or one you enter.
+  The file is encrypted again where it is, with a new salt and its original
+  metadata, and read back from disk and checked before it replaces the old
+  one. The old key no longer opens it.
 
-It's encrypted with a new salt and its original metadata, into the current
-folder under the encrypted file's name, and read back from disk and checked
-before it replaces anything. Only the file you viewed is ever replaced: if
-another file in the current folder has its name, that's left alone and the
-new file gets the next free name, such as `report.txt.2.enc`. If the file
-you viewed is in another folder, it's left unchanged, and with a new key it
-still opens with the old one, so you're told to delete it if you no longer
-need it. With a new key, a key file you viewed it with no longer opens it.
-
-Since the file is always encrypted again into the current folder, view
-checks that it can write there before asking for the key. If you decide not
-to view it at `Show the decrypted file?`, nothing is written. Ctrl-C at any
-point stops without writing anything, and leaves the encrypted file as it
-was.
+If the file's folder can't be written to, it's left as it was, and you're
+told why instead of being asked. If you decide not to view it at `Show the
+decrypted file?`, nothing is written. Ctrl-C at any point stops without
+writing anything, and leaves the encrypted file as it was.
 
 Viewing needs someone at the keyboard, so `view` refuses to run from a script
 (status 2). It only takes `--key-file` and `--quiet`. If something is
@@ -820,7 +812,7 @@ The code is in `src/`:
 | `cli.rs`       | The command line and its options                                     |
 | `encrypt.rs`   | The encrypt command and its report                                   |
 | `decrypt.rs`   | The decrypt command and its report                                   |
-| `view.rs`      | The view command, then encrypting the file viewed again              |
+| `view.rs`      | The view command, then keeping the key or encrypting it again        |
 | `pager.rs`     | Showing a decrypted file on a screen of its own, then erasing it     |
 | `keys.rs`      | Generating, saving, printing and entering keys                       |
 | `history.rs`   | Removing keys and runs of the tool from shell history                |
