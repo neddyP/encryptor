@@ -212,13 +212,10 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     )
 }
 
-/// Checks the magic bytes and returns the format version, if it's one this
-/// version reads.
+/// The format version after the magic bytes, which `open` has checked, if
+/// it's one this version reads.
 fn check_header(bytes: &[u8]) -> Result<u8> {
-    if bytes.len() <= MAGIC.len() || !bytes.starts_with(MAGIC) {
-        return Err(Error::File("not a file encrypted by this tool (missing AGCM header)".into()));
-    }
-    match bytes[MAGIC.len()] {
+    match bytes.get(MAGIC.len()).copied().unwrap_or(0) {
         v @ 1..=VERSION => Ok(v),
         v => Err(Error::File(explain::unsupported_version(v))),
     }
@@ -241,6 +238,6 @@ mod tests {
             assert!(matches!(check_header(&[b'A', b'G', b'C', b'M', v]), Ok(found) if found == v));
         }
         assert!(message(check_header(&[b'A', b'G', b'C', b'M', VERSION + 1])).contains("made by a newer version"));
-        assert!(message(check_header(b"AGCM")).contains("missing AGCM header"));
+        assert!(message(check_header(&[b'A', b'G', b'C', b'M', 0])).contains("no file format 0"));
     }
 }
