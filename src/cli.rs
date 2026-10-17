@@ -32,6 +32,8 @@ pub enum Command {
     Version,
     Encrypt,
     Decrypt,
+    /// Show the file decrypted, then encrypt it again.
+    View,
     Update,
     /// None given: ask which.
     Choose,
@@ -48,7 +50,7 @@ pub struct Invocation {
 /// starts with `-`.
 pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
     let mut options = Options::default();
-    let (mut help, mut version) = (false, false);
+    let (mut help, mut version, mut view) = (false, false, false);
     let mut words = Vec::new();
     let mut args = args.iter();
     let mut only_words = false;
@@ -78,13 +80,15 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
             "-k" | "--key-file" => options.key_file = Some(path()?),
             "--new-key" => options.new_key = Some(path()?),
             "-o" | "--output" => options.output = Some(path()?),
-            "-h" | "--help" | "-V" | "--version" | "--keep" | "--overwrite" | "-y" | "--yes" | "-q" | "--quiet"
+            "-h" | "--help" | "-V" | "--version" | "-v" | "--view" | "--keep" | "--overwrite" | "-y" | "--yes"
+            | "-q" | "--quiet"
                 if inline.is_some() =>
             {
                 return Err(Error::Usage(format!("{name} doesn't take a value")));
             }
             "-h" | "--help" => help = true,
             "-V" | "--version" => version = true,
+            "-v" | "--view" => view = true,
             "--keep" => options.keep = true,
             "--overwrite" => options.overwrite = true,
             "-y" | "--yes" => options.yes = true,
@@ -93,20 +97,22 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
         }
     }
 
-    let mut words = words.into_iter();
-    let command = match words.as_slice().first().map(String::as_str) {
+    let first = words.first().map(String::as_str);
+    let named = first.and_then(named);
+    let command = match (named, first) {
         _ if help => Command::Help,
         _ if version => Command::Version,
-        Some("help") => Command::Help,
-        Some("version") => Command::Version,
-        Some("encrypt" | "enc" | "e") => Command::Encrypt,
-        Some("decrypt" | "dec" | "d") => Command::Decrypt,
-        Some("update") => Command::Update,
-        Some(other) => return Err(Error::Usage(explain::unknown_command(other, usage))),
-        None => Command::Choose,
+        // -v views the file, where decrypt would write it out. Without a
+        // command, every word is a file.
+        (Some(Command::View | Command::Decrypt) | None, _) if view => Command::View,
+        (Some(_), Some(other)) if view => {
+            return Err(Error::Usage(format!("-v (view) can't be used with {other}. For the version, use -V.")));
+        }
+        (Some(command), _) => command,
+        (None, Some(other)) => return Err(Error::Usage(explain::unknown_command(other, usage))),
+        (None, None) => Command::Choose,
     };
-    words.next();
-    let files: Vec<String> = words.collect();
+    let files: Vec<String> = words.into_iter().skip(usize::from(named.is_some())).collect();
     if matches!(command, Command::Help | Command::Version) {
         return Ok(Invocation { command, file: None, options });
     }
@@ -116,10 +122,24 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
     if files.len() > 1 {
         return Err(Error::Usage(match command {
             Command::Decrypt => explain::decrypt_one_at_a_time(&files),
+            Command::View => format!("view was given {} files; it shows one at a time.", files.len()),
             _ => explain::zip_instead(&files),
         }));
     }
     Ok(Invocation { command, file: files.into_iter().next(), options })
+}
+
+/// The command a word names, if it names one.
+fn named(word: &str) -> Option<Command> {
+    match word {
+        "help" => Some(Command::Help),
+        "version" => Some(Command::Version),
+        "encrypt" | "enc" | "e" => Some(Command::Encrypt),
+        "decrypt" | "dec" | "d" => Some(Command::Decrypt),
+        "view" | "v" => Some(Command::View),
+        "update" => Some(Command::Update),
+        _ => None,
+    }
 }
 
 /// Fails if an option doesn't apply to `command`, or two conflict.
@@ -147,6 +167,11 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
         Command::Encrypt if options.overwrite => only("--overwrite", "decrypt"),
         Command::Decrypt if options.new_key.is_some() => only("--new-key", "encrypt"),
         Command::Decrypt if options.keep => only("--keep", "encrypt, which deletes the original; decrypt keeps it anyway"),
+        Command::View
+            if options.new_key.is_some() || options.output.is_some() || options.keep || options.overwrite || options.yes =>
+        {
+            Err(Error::Usage("view only takes --key-file and --quiet; it asks everything else at the keyboard".into()))
+        }
         _ => Ok(()),
     }
 }
@@ -193,6 +218,34 @@ mod tests {
         assert!(parsed(&["-V"]).unwrap().command == Command::Version);
         assert!(parsed(&["version"]).unwrap().command == Command::Version);
         assert!(parsed(&[]).unwrap().command == Command::Choose);
+    }
+
+    #[test]
+    fn views_with_a_command_or_a_flag() {
+        let views: [&[&str]; 5] =
+            [&["view", "a.enc"], &["v", "a.enc"], &["-v", "a.enc"], &["a.enc", "--view"], &["decrypt", "-v", "a.enc"]];
+        for args in views {
+            let run = parsed(args).unwrap_or_else(|_| panic!("{args:?}"));
+            assert!(run.command == Command::View, "{args:?}");
+            assert_eq!(run.file.as_deref(), Some("a.enc"), "{args:?}");
+        }
+        assert!(parsed(&["-v"]).unwrap().command == Command::View);
+        assert!(parsed(&["view"]).unwrap().file.is_none());
+        assert!(usage_error(parsed(&["encrypt", "-v", "a"])).contains("can't be used with encrypt"));
+        assert!(usage_error(parsed(&["--view=x", "a"])).contains("doesn't take a value"));
+        assert!(usage_error(parsed(&["view", "a", "b"])).contains("view was given 2 files"));
+
+        let key = Options { key_file: Some("k".into()), quiet: true, ..Options::default() };
+        assert!(check(Command::View, &key).is_ok());
+        for refused in [
+            Options { yes: true, ..Options::default() },
+            Options { output: Some("o".into()), ..Options::default() },
+            Options { new_key: Some("n".into()), ..Options::default() },
+            Options { keep: true, ..Options::default() },
+            Options { overwrite: true, ..Options::default() },
+        ] {
+            assert!(matches!(check(Command::View, &refused), Err(Error::Usage(_))));
+        }
     }
 
     #[test]

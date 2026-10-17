@@ -440,3 +440,23 @@ fn warns_a_script_about_a_copy_on_write_disk_without_asking() {
     assert!(!run.stderr().contains("Encrypt anyway?"), "{}", run.stderr());
     assert!(dir.exists("a.txt.enc") && !dir.exists("a.txt"));
 }
+
+#[test]
+fn views_only_with_someone_at_the_keyboard() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("view");
+    dir.write("secret.txt", b"top secret contents");
+    dir.encrypt("secret.txt", "secret.key");
+    for args in [&["view", "secret.txt.enc", "-k", "secret.key"][..], &["-v", "secret.txt.enc", "-k", "secret.key"]] {
+        // As `yes | encryptor view ...` would answer.
+        let run = dir.run(args, "y\ny\ny\ny\n");
+        assert_eq!(run.code(), 2, "{}", run.stderr());
+        assert!(run.stderr().contains("needs someone at the keyboard"), "{}", run.stderr());
+        assert!(!run.stdout().contains("top secret") && !run.stderr().contains("top secret"));
+    }
+    assert_eq!(dir.run(&["view", "secret.txt.enc", "--yes"], "").code(), 2, "view takes no --yes");
+    assert_eq!(dir.run(&["encrypt", "-v", "secret.txt.enc"], "").code(), 2);
+    assert!(!dir.exists("secret.txt"), "saved decrypted");
+}

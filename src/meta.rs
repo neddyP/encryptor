@@ -156,7 +156,13 @@ impl Metadata {
                 XATTR => {
                     let nul = value.iter().position(|&b| b == 0).ok_or_else(damaged)?;
                     let name = CString::new(&value[..nul]).map_err(|_| damaged())?;
-                    meta.xattrs.push((name, Zeroizing::new(value[nul + 1..].to_vec())));
+                    // As private as the contents can be, so locked like them.
+                    let value = &value[nul + 1..];
+                    let mut copy = Zeroizing::new(Vec::with_capacity(value.len()));
+                    crate::protect::lock(copy.as_ptr(), value.len());
+                    crate::protect::check_locked().map_err(|e| e.to_string())?;
+                    copy.extend_from_slice(value);
+                    meta.xattrs.push((name, copy));
                 }
                 _ => {}
             }

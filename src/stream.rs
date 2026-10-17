@@ -52,6 +52,9 @@ pub enum Error {
     Memory(u64),
     Random(getrandom::Error),
     Interrupted,
+    /// Memory for plaintext couldn't be locked where it has to be (see
+    /// `protect::require_locking`).
+    Unlocked,
 }
 
 pub struct Encrypted {
@@ -87,6 +90,7 @@ pub fn encrypt(
     let total = metadata.len() as u64 + len;
     let chunks = total.div_ceil(CHUNK as u64);
     let mut buf = chunk_buffer();
+    protect::check_locked().map_err(|_| Error::Unlocked)?;
     let mut hasher = Sha256::new();
     let mut metadata = metadata;
     let mut read = 0;
@@ -131,6 +135,7 @@ pub fn decrypt(
 
     let mut buf = chunk_buffer();
     let mut unpack = Unpack::new(body_len - chunks * TAG_LEN as u64);
+    protect::check_locked().map_err(|_| Error::Unlocked)?;
     let mut hasher = Sha256::new();
     let mut len = 0;
     let mut read = 0;
@@ -196,7 +201,9 @@ struct Unpack {
 
 impl Unpack {
     fn new(total: u64) -> Self {
-        Self { total, encoded: Zeroizing::new(Vec::with_capacity(4)), encoded_len: None, metadata: None }
+        let encoded = Zeroizing::new(Vec::with_capacity(4));
+        protect::lock(encoded.as_ptr(), 4);
+        Self { total, encoded, encoded_len: None, metadata: None }
     }
 
     fn feed(&mut self, mut data: &[u8], contents: &mut impl FnMut(&[u8]) -> Result<(), Error>) -> Result<(), Error> {
@@ -216,11 +223,16 @@ impl Unpack {
                 let mut encoded = Zeroizing::new(Vec::new());
                 encoded.try_reserve_exact(len as usize).map_err(|_| Error::Memory(len))?;
                 protect::lock(encoded.as_ptr(), len as usize);
+                protect::check_locked().map_err(|_| Error::Unlocked)?;
                 encoded.extend_from_slice(&self.encoded);
                 self.encoded = encoded;
                 self.encoded_len = Some(len as usize);
             } else {
-                self.metadata = Some(Metadata::parse(&self.encoded).map_err(Error::Metadata)?.0);
+                let parsed = Metadata::parse(&self.encoded).map_err(|e| match protect::check_locked() {
+                    Err(_) => Error::Unlocked,
+                    Ok(()) => Error::Metadata(e),
+                })?;
+                self.metadata = Some(parsed.0);
             }
         }
         if data.is_empty() { Ok(()) } else { contents(data) }

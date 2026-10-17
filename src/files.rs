@@ -30,6 +30,7 @@ pub fn input_len(command: &str, path: &Path) -> Result<u64> {
     if kind.is_dir() {
         return Err(Error::File(match command {
             "encrypt" => explain::zip_instead(&[path.to_string_lossy().into_owned()]),
+            "view" => format!("{} is a folder; view shows one encrypted file at a time.", safe_path(path)),
             _ => explain::decrypt_folder(path),
         }));
     }
@@ -41,13 +42,17 @@ pub fn input_len(command: &str, path: &Path) -> Result<u64> {
 
 /// Fails, explaining why, if `path` couldn't be created in its folder.
 pub fn check_writable(path: &Path) -> Result<()> {
-    let folder = folder(path);
-    let folder = CString::new(folder.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    can_create(path).map_err(|e| Error::File(explain::file(Action::Create, path, &e)))
+}
+
+/// Whether `path` could be created in its folder, and if not, why.
+pub fn can_create(path: &Path) -> io::Result<()> {
+    let folder = CString::new(folder(path).as_os_str().as_bytes())?;
     // SAFETY: access only reads the NUL-terminated path.
-    if unsafe { libc::access(folder.as_ptr(), libc::W_OK | libc::X_OK) } == 0 {
-        return Ok(());
+    match unsafe { libc::access(folder.as_ptr(), libc::W_OK | libc::X_OK) } {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
     }
-    Err(Error::File(explain::file(Action::Create, path, &io::Error::last_os_error())))
 }
 
 /// Whether two paths lead to the same existing file.
@@ -164,6 +169,13 @@ impl PartFile {
             .open(&tmp)
             .map_err(|e| Error::File(explain::file(Action::Create, path, &e)))?;
         Ok(Self { file, tmp, path: path.to_path_buf(), replace, finished: false })
+    }
+
+    /// Flushes what has been written to disk and returns the temporary file
+    /// holding it, to be read back before `finish` puts it in place.
+    pub fn flushed(&mut self) -> Result<&Path> {
+        self.file.sync_all().map_err(|e| Error::File(explain::file(Action::Write, &self.path, &e)))?;
+        Ok(&self.tmp)
     }
 
     /// Flushes the file to disk and puts it in place, and makes that lasting

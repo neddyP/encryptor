@@ -17,6 +17,7 @@ mod home;
 mod keys;
 mod legacy;
 mod meta;
+mod pager;
 mod protect;
 mod recording;
 mod report;
@@ -25,6 +26,7 @@ mod stream;
 mod term;
 mod timestamps;
 mod update;
+mod view;
 mod wipe;
 
 use std::ffi::OsString;
@@ -48,11 +50,14 @@ encryptor - encrypt and decrypt files with AES-256-GCM
 USAGE:
     encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
     decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
-    encryptor                      show the home screen, to encrypt or decrypt
+    encryptor view FILE.enc        show FILE.enc decrypted on screen, then
+                                   erase it and encrypt it again
+    encryptor                      show the home screen
     encryptor update               update to the latest release
 
 `encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as encrypt
-and decrypt. Anything not given is asked for.
+and decrypt, and `encryptor -v FILE.enc` as view. Anything not given is
+asked for.
 
 OPTIONS:
     -k, --key-file KEY    use the key in KEY: 32 bytes, or 64 hex characters.
@@ -61,6 +66,7 @@ OPTIONS:
                           if it's a folder
         --keep            encrypt: keep the original instead of deleting it
     -o, --output PATH     decrypt: write the decrypted file to PATH
+    -v, --view            view the file, instead of decrypting it to disk
         --overwrite       decrypt: replace the output if it already exists
     -y, --yes             don't ask to confirm encrypting or decrypting
     -q, --quiet           don't print the report
@@ -158,6 +164,7 @@ fn run(args: &[String]) -> Result<()> {
     let file = invocation.file.as_deref();
     match command {
         Command::Encrypt => encrypt::command(file, &invocation.options),
+        Command::View => view::command(file, &invocation.options),
         Command::Update => update::command(),
         _ => decrypt::command(file, &invocation.options),
     }
@@ -169,6 +176,7 @@ fn choose_at_home() -> Result<Option<Command>> {
     let command = match home::show(USAGE, &version())? {
         home::Choice::Encrypt => Command::Encrypt,
         home::Choice::Decrypt => Command::Decrypt,
+        home::Choice::View => Command::View,
         home::Choice::Quit => {
             session::close_now();
             return Ok(None);

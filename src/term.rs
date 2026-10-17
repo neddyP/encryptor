@@ -199,7 +199,7 @@ impl Drop for Progress {
     }
 }
 
-fn short_size(bytes: u64) -> String {
+pub fn short_size(bytes: u64) -> String {
     let mut value = bytes as f64;
     let mut unit = "bytes";
     for next in ["KiB", "MiB", "GiB", "TiB"] {
@@ -231,7 +231,7 @@ pub fn safe_path(path: &Path) -> String {
     safe(&path.to_string_lossy())
 }
 
-fn is_direction_control(c: char) -> bool {
+pub fn is_direction_control(c: char) -> bool {
     matches!(
         c,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'

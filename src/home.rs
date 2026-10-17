@@ -1,6 +1,6 @@
 //! The home screen `encryptor` shows when run on its own in a terminal: the
-//! name in large letters, the version, the help, and keys to encrypt or
-//! decrypt a file. It is drawn on the alternate screen, like `less`, so the
+//! name in large letters, the version, the help, and keys to encrypt, decrypt
+//! or view a file. It is drawn on the alternate screen, like `less`, so the
 //! terminal is left as it was. In a session (see `session`), the run is on
 //! the alternate screen already.
 
@@ -22,12 +22,13 @@ pub const ART: [&str; 7] = [
     r" '--------'                         |___/|_|",
 ];
 
-const KEYS: &str = " e encrypt a file   d decrypt a file   q quit";
+const KEYS: &str = " e encrypt   d decrypt   v view   q quit";
 
 /// What was chosen on the home screen.
 pub enum Choice {
     Encrypt,
     Decrypt,
+    View,
     Quit,
 }
 
@@ -60,6 +61,7 @@ pub fn show(usage: &str, version: &str) -> Result<Choice> {
         top = match key {
             Key::Encrypt => return Ok(Choice::Encrypt),
             Key::Decrypt => return Ok(Choice::Decrypt),
+            Key::View => return Ok(Choice::View),
             Key::Quit => return Ok(Choice::Quit),
             Key::Up => top.saturating_sub(1),
             Key::Down => top + 1,
@@ -133,6 +135,7 @@ fn frame(lines: &[Line], top: usize, rows: usize, cols: usize, color: bool) -> S
 enum Key {
     Encrypt,
     Decrypt,
+    View,
     Quit,
     Up,
     Down,
@@ -151,6 +154,7 @@ fn read_key(next: &mut impl FnMut(Duration) -> Result<Option<u8>>) -> Result<Opt
     Ok(Some(match key {
         term::Key::Byte(b'e' | b'E') => Key::Encrypt,
         term::Key::Byte(b'd' | b'D') => Key::Decrypt,
+        term::Key::Byte(b'v' | b'V') => Key::View,
         // q, Escape on its own, Ctrl-C and Ctrl-D.
         term::Key::Byte(b'q' | b'Q' | 0x03 | 0x04) | term::Key::Escape => Key::Quit,
         term::Key::Byte(b'k') | term::Key::Up => Key::Up,
@@ -249,7 +253,7 @@ mod tests {
         assert!(screen[2].contains("___ _ __   ___"), "{:?}", screen[2]);
         assert!(screen.iter().any(|row| row.trim() == "encryptor 9.9.9"));
         assert!(screen.iter().any(|row| row.trim() == "encrypt FILE"));
-        assert!(screen[29].starts_with(" e encrypt a file   d decrypt a file   q quit"));
+        assert!(screen[29].starts_with(" e encrypt   d decrypt   v view   q quit"));
         assert!(!screen[29].contains("of"), "everything fits, so no position");
     }
 
@@ -261,7 +265,7 @@ mod tests {
         assert_eq!(screen.len(), 12);
         assert!(screen.iter().all(|row| row.chars().count() <= 30), "{screen:?}");
         assert_eq!(screen[0].trim(), "line 1");
-        assert!(screen[11].starts_with(" e encrypt a file"), "{:?}", screen[11]);
+        assert!(screen[11].starts_with(" e encrypt"), "{:?}", screen[11]);
         assert!(visible(&frame(&lines, 10, 12, 80, false))[11].ends_with(&format!("11-21 of {} ", lines.len())));
     }
 
@@ -269,6 +273,7 @@ mod tests {
     fn reads_keys_and_their_escape_sequences() {
         assert_eq!(keys(b"e"), Some(Key::Encrypt));
         assert_eq!(keys(b"D"), Some(Key::Decrypt));
+        assert_eq!(keys(b"v"), Some(Key::View));
         assert_eq!(keys(b"q"), Some(Key::Quit));
         assert_eq!(keys(&[0x03]), Some(Key::Quit));
         assert_eq!(keys(b"\x1b[A"), Some(Key::Up));

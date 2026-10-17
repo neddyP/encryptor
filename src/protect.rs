@@ -37,6 +37,11 @@ unsafe impl GlobalAlloc for ZeroOnFree {
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LOCK_FAILED: AtomicBool = AtomicBool::new(false);
+static LOCKING_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Stack locked below the caller by `lock_stack`: far more than decrypting,
+/// encrypting or drawing a screen takes.
+const STACK_LOCKED: usize = 256 * 1024;
 
 /// Called first thing in `main`, before any secret exists.
 ///
@@ -92,14 +97,114 @@ pub fn check() -> Result<()> {
     if stop_requested() { Err(Error::Interrupted) } else { Ok(()) }
 }
 
-/// Keeps `len` bytes at `ptr` in RAM so they are never written to swap. Large
-/// buffers can exceed the memory-lock limit; that is recorded for the report.
-pub fn lock(ptr: *const u8, len: usize) {
+/// Keeps `len` bytes at `ptr` in RAM so they are never written to swap, and
+/// says whether they were locked. Large buffers can exceed the memory-lock
+/// limit; that is recorded for the report, and for `check_locked`.
+pub fn lock(ptr: *const u8, len: usize) -> bool {
     // SAFETY: the caller passes a live allocation of at least `len` bytes.
     // mlock only pins the pages; it doesn't read or write them.
     if len > 0 && unsafe { libc::mlock(ptr.cast(), len) } != 0 {
         LOCK_FAILED.store(true, Ordering::SeqCst);
+        return false;
     }
+    true
+}
+
+/// From now on, secrets must be kept in locked memory: once anything fails
+/// to lock, `check_locked` fails, so the run stops before plaintext goes into
+/// memory that could be written to swap. Used by view, which keeps the
+/// decrypted file only in locked memory and on the terminal.
+pub fn require_locking() {
+    LOCKING_REQUIRED.store(true, Ordering::SeqCst);
+}
+
+/// Fails if secrets must be kept in locked memory and something couldn't be
+/// locked. Called before plaintext is put into memory just locked.
+pub fn check_locked() -> Result<()> {
+    match LOCKING_REQUIRED.load(Ordering::SeqCst) && LOCK_FAILED.load(Ordering::SeqCst) {
+        true => Err(Error::Message(crate::explain::not_locked())),
+        false => Ok(()),
+    }
+}
+
+/// How much more memory this program can lock now, if that's limited: the
+/// system's limit on it, less what's locked already, and no more than the
+/// memory that's free. `None` where neither can be told.
+pub fn lockable() -> Option<u64> {
+    let limit = lock_limit().map(|limit| limit.saturating_sub(proc_bytes("/proc/self/status", "VmLck:").unwrap_or(0)));
+    // Free memory includes what the system would give up from its caches.
+    let free = proc_bytes("/proc/meminfo", "MemAvailable:");
+    match (limit, free) {
+        (Some(limit), Some(free)) => Some(limit.min(free)),
+        (limit, free) => limit.or(free),
+    }
+}
+
+/// The system's limit on how much memory this program may lock (`ulimit
+/// -l`), if it has one. Root isn't held to it.
+pub fn lock_limit() -> Option<u64> {
+    // SAFETY: geteuid has no arguments and can't fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return None;
+    }
+    // SAFETY: rlimit is plain data, filled in by getrlimit.
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: reads this process's limit into a valid local.
+    if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0 || limit.rlim_cur == libc::RLIM_INFINITY {
+        return None;
+    }
+    Some(limit.rlim_cur as u64)
+}
+
+/// A size in kB from a Linux /proc file, in bytes: the value on the line
+/// that starts with `name`.
+fn proc_bytes(path: &str, name: &str) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = text.lines().find_map(|line| line.strip_prefix(name))?;
+    let kb: u64 = value.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kb * 1024)
+}
+
+/// Locks the stack in RAM, from `STACK_LOCKED` bytes below the caller up to
+/// its top, so the temporaries that hashing, the cipher and formatting leave
+/// on it are never written to swap either. Says whether it was locked.
+#[inline(never)]
+pub fn lock_stack() -> bool {
+    // Written first, so its pages exist to be locked.
+    let mut area = [0u8; STACK_LOCKED];
+    std::hint::black_box(&mut area);
+    let bottom = area.as_ptr() as usize;
+    match stack_top() {
+        Some(top) if top > bottom => lock(bottom as *const u8, top - bottom),
+        _ => {
+            LOCK_FAILED.store(true, Ordering::SeqCst);
+            false
+        }
+    }
+}
+
+/// The top of this thread's stack, the end it grows down from.
+fn stack_top() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: the attributes are filled in by pthread_getattr_np before
+    // they're read, and destroyed after.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let (mut addr, mut size) = (std::ptr::null_mut(), 0);
+        let got = libc::pthread_attr_getstack(&attr, &mut addr, &mut size);
+        libc::pthread_attr_destroy(&mut attr);
+        (got == 0).then(|| addr as usize + size)
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: asks about the calling thread, which exists.
+    unsafe {
+        Some(libc::pthread_get_stackaddr_np(libc::pthread_self()) as usize)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    None
 }
 
 /// Describes how secrets were held in memory, for the report.
@@ -117,4 +222,31 @@ pub fn memory_status() -> &'static str {
 pub fn scrub_stack() {
     let mut area = [0u8; 64 * 1024];
     std::hint::black_box(&mut area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locks_the_stack_down_from_its_top() {
+        // Unless the system allows too little to lock even that.
+        if lock_limit().is_some_and(|limit| limit < 2 * STACK_LOCKED as u64) {
+            return;
+        }
+        let top = stack_top().expect("the stack's top");
+        let here = 0u8;
+        assert!(top > std::ptr::addr_of!(here) as usize, "the stack grows down from its top");
+        assert!(lock_stack());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn knows_how_much_more_it_can_lock() {
+        let free = lockable().expect("Linux says how much memory is free");
+        if let Some(limit) = lock_limit() {
+            assert!(free <= limit, "{free} free to lock under a limit of {limit}");
+        }
+        assert!(proc_bytes("/proc/self/status", "VmLck:").is_some());
+    }
 }

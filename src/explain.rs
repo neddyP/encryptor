@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::error::Error;
 use crate::report::fmt_size;
 use crate::stream;
-use crate::term::{safe, safe_path};
+use crate::term::{safe, safe_path, short_size};
 
 pub const AUTH_FAILED: &str =
     "authentication failed: wrong key, or the file is corrupted or has been tampered with.";
@@ -107,9 +107,12 @@ pub fn missing(command: &str, path: &Path, e: &io::Error) -> String {
     }
     let problem = format!("{} doesn't exist.", safe_path(path));
     let encrypted = crate::files::encrypted_path(path);
+    let command = invocation(command);
     if encrypted.is_file() {
         return match command {
-            "decrypt" => format!("{problem}\nDid you mean the encrypted file?\n  decrypt {}", quote_path(&encrypted)),
+            "decrypt" | "encryptor view" => {
+                format!("{problem}\nDid you mean the encrypted file?\n  {command} {}", quote_path(&encrypted))
+            }
             _ => format!(
                 "{problem}\nIt may be encrypted already, as {} exists. To decrypt it:\n  decrypt {}",
                 safe_path(&encrypted),
@@ -129,9 +132,10 @@ pub fn missing(command: &str, path: &Path, e: &io::Error) -> String {
 
 /// A symbolic link given as the file to encrypt or decrypt.
 pub fn symlink(command: &str, path: &Path) -> String {
+    let command = invocation(command);
     match fs::canonicalize(path) {
         Ok(target) => format!(
-            "{} is a symbolic link to {}.\nFor safety, {command} only works on the file itself, not links to it:\n  {command} {}",
+            "{} is a symbolic link to {}.\nFor safety, only the file itself is used, not links to it:\n  {command} {}",
             safe_path(path),
             safe_path(&target),
             quote_path(&target)
@@ -226,7 +230,7 @@ pub fn unknown_command(arg: &str, usage: &str) -> String {
     if arg.starts_with('-') {
         return format!("unknown option '{}'. These are the options:\n\n{usage}", safe(arg));
     }
-    format!("unknown command '{}'. The commands are encrypt, decrypt and update.\n\n{usage}", safe(arg))
+    format!("unknown command '{}'. The commands are encrypt, decrypt, view and update.\n\n{usage}", safe(arg))
 }
 
 /// `update` can't replace a copy installed some other way, such as one built
@@ -242,10 +246,11 @@ pub fn cant_update(exe: &Path) -> String {
 }
 
 pub fn no_file_given(command: &str) -> String {
-    let example = if command == "decrypt" { "report.pdf.enc" } else { "report.pdf" };
+    let example = if command == "encrypt" { "report.pdf" } else { "report.pdf.enc" };
     format!(
         "no file given.\nType the file's path, or drag the file into this window. \
-         You can also give it on the command line, for example:\n  {command} {example}"
+         You can also give it on the command line, for example:\n  {} {example}",
+        invocation(command)
     )
 }
 
@@ -279,6 +284,95 @@ pub fn no_working_folder(e: &io::Error) -> String {
     } else {
         format!("cannot find the current folder: {e}")
     }
+}
+
+/// view run with no one at the keyboard, as in a script.
+pub fn view_needs_keyboard() -> String {
+    "view needs someone at the keyboard: it shows the file on the terminal, then asks which key to \
+     encrypt it again with.\nTo decrypt a file in a script, use decrypt:\n  decrypt FILE.enc --key-file KEY --yes"
+        .into()
+}
+
+/// view run where a decrypted file couldn't be shown and erased.
+pub fn cant_view_here(reason: &str) -> String {
+    format!(
+        "the file can't be shown here: {reason}.\nTo read it, decrypt it to a file instead, and \
+         encrypt it again when you're done."
+    )
+}
+
+/// A file too large to view, which holds it all in locked memory. `room` is
+/// the largest file there's room to lock now, where that's what limits it,
+/// and `output` where decrypting it would write it.
+pub fn too_large_to_view(path: &Path, len: u64, room: Option<u64>, output: &Path) -> String {
+    let why = match room {
+        Some(0) => "view keeps the decrypted file in locked memory, which is never written to swap, and \
+                    there's no room left to lock a file in"
+            .to_string(),
+        Some(room) => format!(
+            "view keeps the decrypted file in locked memory, which is never written to swap, and there's \
+             only room to lock files of up to {} now",
+            short_size(room)
+        ),
+        None => format!("view shows files of up to {}", short_size(crate::pager::MAX_LEN)),
+    };
+    format!(
+        "{} is {}, too large to view: {why}.\nDecrypting writes it to {} instead, as plaintext on disk until \
+         you encrypt it again. To view larger files, an administrator can raise the memory lock limit \
+         (memlock, in /etc/security/limits.conf).",
+        safe_path(path),
+        short_size(len),
+        safe_path(output)
+    )
+}
+
+/// Memory that plaintext had to be kept in couldn't be locked, so the run
+/// stopped before putting any there.
+pub fn not_locked() -> String {
+    let limit = match crate::protect::lock_limit() {
+        Some(limit) => format!(
+            "\nThis system lets a program lock {} (`ulimit -l`); an administrator can raise that \
+             (memlock, in /etc/security/limits.conf).",
+            short_size(limit)
+        ),
+        None => String::new(),
+    };
+    format!(
+        "memory for the decrypted data couldn't be locked, so encryptor stopped before putting any \
+         there, as unlocked memory can be written to swap.{limit}"
+    )
+}
+
+/// What showing a decrypted file does and doesn't protect, said before it's
+/// shown.
+pub const BEFORE_VIEWING: &str = "\
+Before it's shown:
+  - It's held only in locked memory, never written to swap or disk, and
+    shown on a screen of its own with no scrollback. When you press Enter,
+    it's erased and encrypted again.
+  - Anyone who can see your screen, or a screenshot, screen share or
+    recording of it, sees the file too.
+  - Selecting text copies it to your clipboard, and clipboard history
+    keeps it.
+  - Your terminal program holds what it shows in its own memory, which
+    this tool can't wipe.";
+
+/// view can't write in the current folder, where it encrypts the file again.
+pub fn view_cant_write(output: &Path, e: &io::Error) -> String {
+    format!(
+        "view can't encrypt the file again here: {}. Nothing was decrypted.\nGo to a folder you can \
+         write in, and view it from there.",
+        cause(Action::Create, output, e)
+    )
+}
+
+/// Every name for a file encrypted again is taken.
+pub fn no_free_name(path: &Path) -> String {
+    format!(
+        "{} and 999 names like it are taken by other files, so there's nowhere to encrypt the file \
+         again. Nothing was decrypted. Move the ones you don't need, then try again.",
+        safe_path(path)
+    )
 }
 
 /// A file given to decrypt that doesn't start like one this tool encrypted.
@@ -380,6 +474,7 @@ pub fn stream_failure(e: stream::Error, input: &Path, output: &Path, key_file: O
         stream::Error::Memory(len) => no_memory(len).into(),
         stream::Error::Random(e) => random_failed(e).into(),
         stream::Error::Interrupted => Error::Interrupted,
+        stream::Error::Unlocked => Error::Message(not_locked()),
     }
 }
 
@@ -607,6 +702,12 @@ fn same_name_but_case(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(found))
 }
 
+/// How `command` is run: view is a word after encryptor, not a command of
+/// its own.
+fn invocation(command: &str) -> &str {
+    if command == "view" { "encryptor view" } else { command }
+}
+
 fn join(problem: String, fix: &str) -> String {
     if fix.is_empty() { problem } else { format!("{problem}\n{fix}") }
 }
@@ -671,6 +772,8 @@ mod tests {
         assert!(encrypt.contains("It may be encrypted already"), "{encrypt}");
         let case = missing("encrypt", &dir.join("notes.txt"), &gone);
         assert!(case.contains("Did you mean") && case.ends_with("Notes.txt"), "{case}");
+        let view = missing("view", &dir.join("report.pdf"), &gone);
+        assert!(view.contains("the encrypted file?\n  encryptor view ") && view.ends_with("report.pdf.enc"), "{view}");
         let neither = missing("encrypt", &dir.join("other"), &gone);
         assert!(neither.contains("Check the spelling"), "{neither}");
         fs::remove_dir_all(&dir).unwrap();
@@ -760,6 +863,29 @@ mod tests {
 
         let many: Vec<String> = (0..20).map(|i| format!("file-{i}.txt")).collect();
         assert!(zip_instead(&many).contains("zip -r files.zip FILE1 FILE2 ...\n"));
+    }
+
+    #[test]
+    fn says_why_a_file_is_too_large_to_view() {
+        let (path, output, mib) = (Path::new("film.mp4.enc"), Path::new("film.mp4"), 1 << 20);
+        let locked = too_large_to_view(path, 12 * mib, Some(7 * mib), output);
+        assert!(locked.starts_with("film.mp4.enc is 12.0 MiB, too large to view: "), "{locked}");
+        assert!(locked.contains("only room to lock files of up to 7.0 MiB now"), "{locked}");
+        assert!(locked.contains("Decrypting writes it to film.mp4 instead"), "{locked}");
+        assert!(too_large_to_view(path, mib, Some(0), output).contains("no room left to lock a file in"));
+        assert!(too_large_to_view(path, 5 << 30, None, output).contains("view shows files of up to 4.0 GiB"));
+    }
+
+    #[test]
+    fn names_view_as_it_is_run() {
+        assert!(no_file_given("view").ends_with("  encryptor view report.pdf.enc"));
+        assert!(no_file_given("decrypt").ends_with("  decrypt report.pdf.enc"));
+        assert!(no_file_given("encrypt").ends_with("  encrypt report.pdf"));
+        let dir = scratch("view-link");
+        fs::write(dir.join("real.enc"), b"x").unwrap();
+        std::os::unix::fs::symlink(dir.join("real.enc"), dir.join("link")).unwrap();
+        assert!(symlink("view", &dir.join("link")).contains("\n  encryptor view "));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

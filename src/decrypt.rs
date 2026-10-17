@@ -1,5 +1,6 @@
 //! The decrypt command: checks, key, decryption of any format version,
-//! verification from disk, metadata restored, then a report printed.
+//! verification from disk, metadata restored, then a report printed. The
+//! checks, the key and decrypting whole files are shared with `view`.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
@@ -69,15 +70,20 @@ pub fn key(options: &Options, run_again: &str, plain: &Path) -> Result<(SecretKe
 }
 
 /// Decrypts a version 1 or 2 file, which was encrypted whole, into memory.
+/// It's decrypted in place, so where memory has to be locked, it stops
+/// first if the file couldn't be.
 pub fn whole(
     key: &[u8; KEY_LEN],
     input: &Path,
     key_file: Option<&Path>,
 ) -> Result<(Option<Metadata>, Zeroizing<Vec<u8>>)> {
-    legacy::decrypt(key, files::read_file(input)?).map_err(|e| match e {
-        Error::AuthFailed => Error::KeyOrData(explain::wrong_key(input, key_file)),
-        Error::Message(e) => Error::KeyOrData(e),
-        e => e,
+    let blob = files::read_file(input)?;
+    protect::check_locked()?;
+    legacy::decrypt(key, blob).map_err(|e| match (protect::check_locked(), e) {
+        (Err(unlocked), _) => unlocked,
+        (Ok(()), Error::AuthFailed) => Error::KeyOrData(explain::wrong_key(input, key_file)),
+        (Ok(()), Error::Message(e)) => Error::KeyOrData(e),
+        (Ok(()), e) => e,
     })
 }
 

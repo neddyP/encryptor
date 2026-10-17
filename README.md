@@ -4,8 +4,9 @@ An interactive command-line tool for encrypting and decrypting files with
 **AES-256-GCM**, written in Rust.
 
 ```
-encrypt report.pdf        # → report.pdf.enc, original securely deleted
-decrypt report.pdf.enc    # → report.pdf
+encrypt report.pdf                 # → report.pdf.enc, original securely deleted
+decrypt report.pdf.enc             # → report.pdf
+encryptor view report.pdf.enc      # shown on screen, erased, then encrypted again
 ```
 
 Install it on Linux or macOS with:
@@ -28,6 +29,12 @@ Either way, `encryptor update` updates it. See [Install](#install) for details.
 
 - **AES-256-GCM authenticated encryption.** Any change to an encrypted file,
   even a single bit, is detected and decryption refuses to proceed.
+- **View without decrypting to disk.** `encryptor view` (or `-v`) decrypts a
+  file into locked memory and shows it on a screen of its own, which keeps
+  no scrollback, until you press Enter. Then it's erased and encrypted
+  again, with the same key or a new one, as you choose. The plaintext is
+  only ever in locked memory and on the terminal, and the encrypted file is
+  untouched until the new one has been checked.
 - **Random or your own keys.** Generate a 256-bit key from the operating
   system's secure random generator, or supply one as 64 hex characters or a
   32-byte key file.
@@ -267,7 +274,9 @@ you also installed it another way, whichever `encrypt` comes first on your
 ```
 encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
 decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
-encryptor                      show the home screen, to encrypt or decrypt
+encryptor view FILE.enc        show FILE.enc decrypted on screen, then
+                               erase it and encrypt it again
+encryptor                      show the home screen
 encryptor update               update to the latest release
 ```
 
@@ -281,8 +290,9 @@ latest. It's the only time encryptor goes online; it never checks for
 updates by itself.
 
 `encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as
-`encrypt` and `decrypt`. Each option answers one of the questions in
-advance, so it isn't asked:
+`encrypt` and `decrypt`, and `encryptor -v FILE.enc` (or `decrypt -v`) the
+same as `encryptor view`; see [Viewing](#viewing). Each option answers one of
+the questions in advance, so it isn't asked:
 
 | Option                | What it does                                                        |
 | --------------------- | ------------------------------------------------------------------- |
@@ -291,6 +301,7 @@ advance, so it isn't asked:
 | `--keep`              | Encrypt, but keep the original instead of deleting it               |
 | `-o`, `--output PATH` | Decrypt to `PATH` instead of next to the encrypted file            |
 | `--overwrite`         | Decrypt over the output file if it already exists                   |
+| `-v`, `--view`        | View the file instead of decrypting it to disk                      |
 | `-y`, `--yes`         | Don't ask to confirm encrypting or decrypting                       |
 | `-q`, `--quiet`       | Don't print the report                                              |
 | `-h`, `--help`        | Show the usage                                                      |
@@ -306,8 +317,8 @@ straight away. In scripts, with no terminal, everything is printed as usual.
 
 Run on its own, or with `--help`, `encryptor` shows a home screen: its name,
 the version and this help. Press `e` to encrypt a file, `d` to decrypt one,
-or `q` to quit; the arrow keys scroll if it doesn't all fit. Without a
-terminal it asks "Encrypt or decrypt?" instead.
+`v` to view one, or `q` to quit; the arrow keys scroll if it doesn't all
+fit. Without a terminal it asks "Encrypt or decrypt?" instead.
 
 If you leave out `FILE`, you're asked for it. Typed paths may be quoted or
 start with `~/`, so you can drag a file into the terminal.
@@ -519,6 +530,104 @@ Nothing was written.
 - If the key is right, report.pdf.enc was changed or damaged after it was encrypted, for example by an incomplete copy or download. Try another copy of it.
 ```
 
+### Viewing
+
+`encryptor view` shows an encrypted file without ever decrypting it to disk,
+then encrypts it again:
+
+```
+$ encryptor view report.txt.enc
+Enter key (64 hex characters, or path to a key file from current directory):
+
+Before it's shown:
+  - It's held only in locked memory, never written to swap or disk, and
+    shown on a screen of its own with no scrollback. When you press Enter,
+    it's erased and encrypted again.
+  - Anyone who can see your screen, or a screenshot, screen share or
+    recording of it, sees the file too.
+  - Selecting text copies it to your clipboard, and clipboard history
+    keeps it.
+  - Your terminal program holds what it shows in its own memory, which
+    this tool can't wipe.
+Show the decrypted file? [y/n]: y
+```
+
+The decrypted file only ever exists in locked memory, which is never written
+to swap, and on the terminal. Everything the
+plaintext passes through is locked: the file's buffer, the chunk being
+decrypted, its stored metadata, each screenful and the stack. If any of it
+can't be locked, view stops before putting plaintext there. It's shown on a
+screen of its own with its name at the top. The arrow keys, PgUp, PgDn, Home
+and End scroll it. Long lines wrap at the window's edge. As with a printed
+key, it's written straight to the terminal, never to standard output, so
+redirecting the output can't capture it, and each screenful is built in
+locked memory and wiped as soon as it's drawn.
+
+Control characters in the file, such as Escape, are shown as `^[` and the
+like rather than sent to the terminal, so a file can't clear the screen,
+retitle the window or write to the clipboard through escape sequences of
+its own. Direction overrides, which reorder the text around them, are shown
+escaped too. A file that isn't text is shown as a hex dump.
+
+Press Enter (or `q`, or Escape) when you're done, and the screen is erased.
+Then it's encrypted again; you're only asked which key to use:
+
+```
+The file was shown, then erased from the screen.
+
+Now it's encrypted again, replacing /home/you/report.txt.enc:
+  s  with the same key, from report.txt.key
+  n  with a new key
+Same key or a new one? [s/n]:
+```
+
+- **`s`** encrypts it with the key you viewed it with, from its key file or
+  as you entered it.
+- **`n`** asks the key questions from scratch, as `encrypt` asks them: a new
+  random key, saved or printed, or one you enter.
+
+It's encrypted with a new salt and its original metadata, into the current
+folder under the encrypted file's name, and read back from disk and checked
+before it replaces anything. Only the file you viewed is ever replaced: if
+another file in the current folder has its name, that's left alone and the
+new file gets the next free name, such as `report.txt.2.enc`. If the file
+you viewed is in another folder, it's left unchanged, and with a new key it
+still opens with the old one, so you're told to delete it if you no longer
+need it. With a new key, a key file you viewed it with no longer opens it.
+
+Since the file is always encrypted again into the current folder, view
+checks that it can write there before asking for the key. If you decide not
+to view it at `Show the decrypted file?`, nothing is written. Ctrl-C at any
+point stops without writing anything, and leaves the encrypted file as it
+was.
+
+Viewing needs someone at the keyboard, so `view` refuses to run from a script
+(status 2). It only takes `--key-file` and `--quiet`. If something is
+[recording the session](#when-the-session-is-being-recorded), it's named
+first and you're asked `Showing the file would save its contents to script.
+Show it anyway?`.
+
+The whole file is held in locked memory, so as soon as view has the file's
+name, it checks how much more memory it can lock: the system's limit
+(`ulimit -l`, often 8 MiB on Linux) less what it has locked already, and no
+more than the memory that's free. Root isn't held to the limit. If the file
+doesn't fit, with about 1 MiB to work in, it isn't viewed, and no key is
+asked for:
+
+```
+film.mp4.enc is 12.0 MiB, too large to view: view keeps the decrypted file in locked
+memory, which is never written to swap, and there's only room to lock files of up to
+7.0 MiB now.
+Decrypting writes it to film.mp4 instead, as plaintext on disk until you encrypt it
+again. To view larger files, an administrator can raise the memory lock limit
+(memlock, in /etc/security/limits.conf).
+Decrypt it to a file, or quit? [d/q]:
+```
+
+`d` decrypts it just as `decrypt` would, beside the encrypted file, asking
+for the key then, or using `--key-file`. `q` quits without writing anything.
+Files over 4 GiB can't be viewed at all.
+
 ### Scripting
 
 In scripts, give options rather than answers, so nothing is asked:
@@ -700,6 +809,13 @@ starts with the metadata, as above; version 1's is just the contents.
   (`pam_tty_audit`) can't be seen from inside the session, and would capture
   a printed key. Save the key instead of printing it when a session might be
   recorded.
+- **Viewing a file shows it to whatever can see your screen.** `view` keeps
+  the decrypted file off the disk and out of scrollback, but screenshots,
+  screen sharing and recorders it can't detect see what's on the screen, and
+  the terminal program holds it in memory while it's shown. Text selected on
+  the screen goes onto the clipboard. Locked memory stays out of swap, but a
+  computer that hibernates or suspends to disk while a file is shown writes
+  all of memory to the disk, so use full-disk encryption there too.
 - **Keys are raw 256-bit values, not passwords.** There's no password-based
   key derivation, so use generated keys rather than typing in something
   memorable.
@@ -727,7 +843,8 @@ another implementation, decrypting the earlier formats, key parsing,
 overwriting and deleting files (including when a file is swapped for a
 symlink part way through, is read-only, or has other names), removing shell
 history entries, thumbnails and recently used entries, escaping of untrusted file
-names, recognising recorders and the files they write to, storing and restoring
+names, laying out a viewed file and showing its control characters instead of
+obeying them, recognising recorders and the files they write to, storing and restoring
 metadata (including reading files from earlier versions), telling how a copy
 was installed so `encryptor update` can update it, and the advice in error
 messages. `tests/cli.rs` runs the program itself as a script would, with its
@@ -741,6 +858,8 @@ The code is in `src/`:
 | `cli.rs`       | The command line and its options                                     |
 | `encrypt.rs`   | The encrypt command and its report                                   |
 | `decrypt.rs`   | The decrypt command and its report                                   |
+| `view.rs`      | The view command, then encrypting the file viewed again              |
+| `pager.rs`     | Showing a decrypted file on a screen of its own, then erasing it     |
 | `keys.rs`      | Generating, saving, printing and entering keys                       |
 | `history.rs`   | Removing keys and runs of the tool from shell history                |
 | `timestamps.rs` | Setting its own files' last-read times back to install time     |
