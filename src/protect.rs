@@ -4,7 +4,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
 
@@ -108,6 +108,33 @@ pub fn lock(ptr: *const u8, len: usize) -> bool {
         return false;
     }
     true
+}
+
+/// Why there's no buffer for a secret.
+pub enum NoBuffer {
+    /// There isn't this many bytes of memory free.
+    Memory(u64),
+    /// It couldn't be locked where secrets must be (see `require_locking`).
+    Unlocked,
+}
+
+/// An empty buffer for secrets with room for exactly `capacity` bytes,
+/// allocated up front so it never grows and leaves copies behind, locked in
+/// RAM when the limit allows, and wiped when dropped. Fails if there isn't
+/// the memory, or if it couldn't be locked where secrets must be.
+pub fn locked(capacity: usize) -> std::result::Result<Zeroizing<Vec<u8>>, NoBuffer> {
+    let mut buf = Zeroizing::new(Vec::new());
+    buf.try_reserve_exact(capacity).map_err(|_| NoBuffer::Memory(capacity as u64))?;
+    lock(buf.as_ptr(), capacity);
+    check_locked().map_err(|_| NoBuffer::Unlocked)?;
+    Ok(buf)
+}
+
+/// `locked`, filled with `len` zeros.
+pub fn locked_zeros(len: usize) -> std::result::Result<Zeroizing<Vec<u8>>, NoBuffer> {
+    let mut buf = locked(len)?;
+    buf.resize(len, 0);
+    Ok(buf)
 }
 
 /// From now on, secrets must be kept in locked memory: once anything fails

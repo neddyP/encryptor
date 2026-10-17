@@ -87,16 +87,11 @@ pub fn open_uncached(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-/// A zeroed buffer for plaintext and other secrets: allocated at its final
-/// size so it never reallocates and leaves copies behind, locked in RAM when
-/// the limit allows, and wiped when dropped.
+/// A zeroed, locked buffer for plaintext and other secrets the size of a
+/// file (see `protect::locked`).
 pub fn secret_buffer(len: u64) -> Result<Zeroizing<Vec<u8>>> {
     let size = usize::try_from(len).map_err(|_| explain::no_memory(len))?;
-    let mut buf = Zeroizing::new(Vec::new());
-    buf.try_reserve_exact(size).map_err(|_| explain::no_memory(len))?;
-    buf.resize(size, 0);
-    protect::lock(buf.as_ptr(), size);
-    Ok(buf)
+    Ok(protect::locked_zeros(size)?)
 }
 
 /// Reads a whole file, refusing symlinks, into a secret buffer.

@@ -324,8 +324,7 @@ fn key_from_file(path: &Path, mut file: File) -> Result<SecretKey> {
         return Err(Error::File(explain::key_file_folder(path)));
     }
     // A key as hex text is at most 64 characters and a line break or two.
-    let mut contents = Zeroizing::new([0u8; 2 * KEY_LEN + 3]);
-    protect::lock(contents.as_ptr(), contents.len());
+    let mut contents = protect::locked_zeros(2 * KEY_LEN + 3)?;
     let mut len = 0;
     while len < contents.len() {
         match file.read(&mut contents[len..]) {

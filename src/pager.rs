@@ -276,9 +276,7 @@ fn body_rows(rows: usize) -> usize {
 /// of the file is put in it, if the memory couldn't be locked.
 fn frame(page: &Page, title: &str, top: usize, rows: usize, cols: usize) -> Result<Zeroizing<Vec<u8>>> {
     let body = body_rows(rows);
-    let mut out = Zeroizing::new(Vec::with_capacity(frame_capacity(rows, cols)));
-    protect::lock(out.as_ptr(), out.capacity());
-    protect::check_locked()?;
+    let mut out = protect::locked(frame_capacity(rows, cols))?;
     bar(&mut out, 1, title, "", cols);
     for (i, row) in (top..top + body).enumerate() {
         let _ = write!(out, "\x1b[{};1H\x1b[2K", i + 2);

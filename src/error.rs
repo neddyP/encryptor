@@ -48,6 +48,15 @@ impl fmt::Display for Error {
     }
 }
 
+impl From<crate::protect::NoBuffer> for Error {
+    fn from(e: crate::protect::NoBuffer) -> Self {
+        match e {
+            crate::protect::NoBuffer::Memory(len) => Self::Message(crate::explain::no_memory(len)),
+            crate::protect::NoBuffer::Unlocked => Self::Message(crate::explain::not_locked()),
+        }
+    }
+}
+
 impl From<String> for Error {
     fn from(message: String) -> Self {
         Self::Message(message)

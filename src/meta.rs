@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
+use crate::error::Error;
 use crate::explain::listed;
 use crate::term::safe;
 
@@ -158,9 +159,7 @@ impl Metadata {
                     let name = CString::new(&value[..nul]).map_err(|_| damaged())?;
                     // As private as the contents can be, so locked like them.
                     let value = &value[nul + 1..];
-                    let mut copy = Zeroizing::new(Vec::with_capacity(value.len()));
-                    crate::protect::lock(copy.as_ptr(), value.len());
-                    crate::protect::check_locked().map_err(|e| e.to_string())?;
+                    let mut copy = crate::protect::locked(value.len()).map_err(|e| Error::from(e).to_string())?;
                     copy.extend_from_slice(value);
                     meta.xattrs.push((name, copy));
                 }
@@ -327,8 +326,8 @@ mod xattr {
     fn read(mut get: impl FnMut(&mut [u8]) -> libc::ssize_t) -> io::Result<Zeroizing<Vec<u8>>> {
         let size = |n: libc::ssize_t| usize::try_from(n).map_err(|_| io::Error::last_os_error());
         for _ in 0..8 {
-            let mut buf = Zeroizing::new(vec![0u8; size(get(&mut []))?]);
-            crate::protect::lock(buf.as_ptr(), buf.len());
+            let mut buf = crate::protect::locked_zeros(size(get(&mut []))?)
+                .map_err(|e| io::Error::other(Error::from(e).to_string()))?;
             match size(get(&mut buf)) {
                 Ok(n) => {
                     buf.truncate(n);

@@ -57,6 +57,15 @@ pub enum Error {
     Unlocked,
 }
 
+impl From<protect::NoBuffer> for Error {
+    fn from(e: protect::NoBuffer) -> Self {
+        match e {
+            protect::NoBuffer::Memory(len) => Self::Memory(len),
+            protect::NoBuffer::Unlocked => Self::Unlocked,
+        }
+    }
+}
+
 pub struct Encrypted {
     /// SHA-256 of the contents, for verifying the file once written.
     pub hash: Zeroizing<[u8; 32]>,
@@ -89,8 +98,7 @@ pub fn encrypt(
 
     let total = metadata.len() as u64 + len;
     let chunks = total.div_ceil(CHUNK as u64);
-    let mut buf = chunk_buffer();
-    protect::check_locked().map_err(|_| Error::Unlocked)?;
+    let mut buf = protect::locked_zeros(CHUNK + TAG_LEN)?;
     let mut hasher = Sha256::new();
     let mut metadata = metadata;
     let mut read = 0;
@@ -133,9 +141,8 @@ pub fn decrypt(
     }
     let cipher = file_cipher(key, header);
 
-    let mut buf = chunk_buffer();
-    let mut unpack = Unpack::new(body_len - chunks * TAG_LEN as u64);
-    protect::check_locked().map_err(|_| Error::Unlocked)?;
+    let mut buf = protect::locked_zeros(CHUNK + TAG_LEN)?;
+    let mut unpack = Unpack::new(body_len - chunks * TAG_LEN as u64)?;
     let mut hasher = Sha256::new();
     let mut len = 0;
     let mut read = 0;
@@ -176,13 +183,6 @@ fn nonce(n: u64, last: bool) -> Nonce<Aes256Gcm> {
     nonce.into()
 }
 
-/// A buffer for one chunk and its tag, locked in RAM and wiped when dropped.
-fn chunk_buffer() -> Zeroizing<Vec<u8>> {
-    let buf = Zeroizing::new(vec![0u8; CHUNK + TAG_LEN]);
-    protect::lock(buf.as_ptr(), buf.len());
-    buf
-}
-
 fn damaged() -> String {
     "the metadata stored in the file is damaged".into()
 }
@@ -200,10 +200,8 @@ struct Unpack {
 }
 
 impl Unpack {
-    fn new(total: u64) -> Self {
-        let encoded = Zeroizing::new(Vec::with_capacity(4));
-        protect::lock(encoded.as_ptr(), 4);
-        Self { total, encoded, encoded_len: None, metadata: None }
+    fn new(total: u64) -> Result<Self, Error> {
+        Ok(Self { total, encoded: protect::locked(4)?, encoded_len: None, metadata: None })
     }
 
     fn feed(&mut self, mut data: &[u8], contents: &mut impl FnMut(&[u8]) -> Result<(), Error>) -> Result<(), Error> {
@@ -220,10 +218,7 @@ impl Unpack {
                 if len > self.total {
                     return Err(Error::Metadata(damaged()));
                 }
-                let mut encoded = Zeroizing::new(Vec::new());
-                encoded.try_reserve_exact(len as usize).map_err(|_| Error::Memory(len))?;
-                protect::lock(encoded.as_ptr(), len as usize);
-                protect::check_locked().map_err(|_| Error::Unlocked)?;
+                let mut encoded = protect::locked(len as usize)?;
                 encoded.extend_from_slice(&self.encoded);
                 self.encoded = encoded;
                 self.encoded_len = Some(len as usize);

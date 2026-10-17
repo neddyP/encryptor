@@ -69,17 +69,14 @@ pub fn key(options: &Options, run_again: &str, plain: &Path) -> Result<(SecretKe
     keys::prompt(false, &give_up)
 }
 
-/// Decrypts a version 1 or 2 file, which was encrypted whole, into memory.
-/// It's decrypted in place, so where memory has to be locked, it stops
-/// first if the file couldn't be.
+/// Decrypts a version 1 or 2 file, which was encrypted whole, into memory,
+/// in place in the locked buffer it's read into.
 pub fn whole(
     key: &[u8; KEY_LEN],
     input: &Path,
     key_file: Option<&Path>,
 ) -> Result<(Option<Metadata>, Zeroizing<Vec<u8>>)> {
-    let blob = files::read_file(input)?;
-    protect::check_locked()?;
-    legacy::decrypt(key, blob).map_err(|e| match (protect::check_locked(), e) {
+    legacy::decrypt(key, files::read_file(input)?).map_err(|e| match (protect::check_locked(), e) {
         (Err(unlocked), _) => unlocked,
         (Ok(()), Error::AuthFailed) => Error::KeyOrData(explain::wrong_key(input, key_file)),
         (Ok(()), Error::Message(e)) => Error::KeyOrData(e),

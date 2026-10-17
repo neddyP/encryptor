@@ -27,7 +27,7 @@ pub fn read_line(prompt: &str) -> Result<Zeroizing<String>> {
         note_piped_answers();
     }
     show_prompt(prompt)?;
-    let mut line = line_buffer();
+    let mut line = line_buffer()?;
     loop {
         match read_byte(libc::STDIN_FILENO)? {
             None if line.is_empty() => return Err(input_ended().into()),
@@ -47,7 +47,7 @@ pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
         return read_line(prompt);
     }
     eprint!("{prompt}");
-    let mut line = line_buffer();
+    let mut line = line_buffer()?;
     {
         let _raw = RawMode::enter(libc::STDIN_FILENO)?;
         loop {
@@ -90,8 +90,7 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
         Err(reason) => return Ok(Shown::Unavailable(reason)),
     };
 
-    let mut hex = Zeroizing::new([0u8; 64]);
-    protect::lock(hex.as_ptr(), hex.len());
+    let mut hex = protect::locked_zeros(64)?;
     hex::encode_to_slice(key, &mut hex[..]).expect("a 32-byte key is 64 hex characters");
 
     let in_session = session::active();
@@ -285,10 +284,8 @@ pub fn choose<'a>(question: &str, options: &[&'a str]) -> Result<&'a str> {
     }
 }
 
-fn line_buffer() -> Zeroizing<Vec<u8>> {
-    let line = Zeroizing::new(Vec::with_capacity(MAX_LINE));
-    protect::lock(line.as_ptr(), MAX_LINE);
-    line
+fn line_buffer() -> Result<Zeroizing<Vec<u8>>> {
+    Ok(protect::locked(MAX_LINE)?)
 }
 
 fn push(line: &mut Vec<u8>, byte: u8) -> Result<()> {
@@ -504,7 +501,7 @@ mod tests {
 
     #[test]
     fn trims_without_copying() {
-        let mut line = line_buffer();
+        let mut line = line_buffer().unwrap();
         line.extend_from_slice(b"  abc def \t");
         let ptr = line.as_ptr();
         let done = finish(line).unwrap();

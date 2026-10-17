@@ -173,7 +173,6 @@ fn decrypt_to_memory(
     // Allocated at the most the contents could be, so it never grows and
     // leaves copies behind.
     let mut contents = files::secret_buffer(body_len)?;
-    protect::check_locked()?;
     let mut rest = &mut contents[..];
     let opened = stream::decrypt(key, &header, &mut source, body_len, &mut rest, &mut |_| {})
         .map_err(|e| explain::stream_failure(e, input, input, key_file))?;
