@@ -352,7 +352,7 @@ pub fn copy_on_write(file: &File) -> Option<&'static str> {
 }
 
 /// The folder a path is in, as given.
-fn folder(path: &Path) -> &Path {
+pub fn folder(path: &Path) -> &Path {
     path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
 }
 

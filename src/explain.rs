@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use crate::error::Error;
+use crate::files::folder;
 use crate::report::fmt_size;
 use crate::stream;
 use crate::term::{safe, safe_path, short_size};
@@ -677,11 +678,6 @@ pub fn listed(items: &[&str]) -> String {
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
         None => String::new(),
     }
-}
-
-/// The folder a path is in, as given.
-fn folder(path: &Path) -> &Path {
-    path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
 }
 
 fn folder_name(folder: &Path) -> String {

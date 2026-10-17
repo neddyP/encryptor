@@ -17,6 +17,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::explain::listed;
 use crate::term::safe;
 
 /// Programs that record, log or share what is shown in the terminal they run,
@@ -84,11 +85,7 @@ pub fn names(recorders: &[Recorder]) -> String {
             names.push(name);
         }
     }
-    match names.split_last() {
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => String::new(),
-    }
+    listed(&names.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// Before something secret is shown: lists the `recorders` found under a

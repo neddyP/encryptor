@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::explain::{self, Action};
-use crate::term::{confirm, safe};
+use crate::term::{confirm, safe, short_size};
 
 /// Prints the report. With `ask`, it then offers to save it as a text file.
 /// What's shown keeps the file names and paths; what's saved to disk leaves
@@ -102,20 +102,12 @@ fn offer_to_save(text: &str, summary_base: &str) -> Result<()> {
     Ok(())
 }
 
+/// The exact size, and in KiB, MiB and so on once it's that large.
 pub fn fmt_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} bytes");
+    match bytes {
+        0..1024 => format!("{bytes} bytes"),
+        _ => format!("{bytes} bytes ({})", short_size(bytes)),
     }
-    let mut value = bytes as f64;
-    let mut unit = "";
-    for u in ["KiB", "MiB", "GiB", "TiB"] {
-        value /= 1024.0;
-        unit = u;
-        if value < 1024.0 {
-            break;
-        }
-    }
-    format!("{bytes} bytes ({value:.1} {unit})")
 }
 
 #[cfg(test)]
