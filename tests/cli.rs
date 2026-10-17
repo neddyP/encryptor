@@ -278,7 +278,7 @@ fn still_takes_piped_answers_but_says_they_are_going() {
     let dir = Scratch::new("piped");
     dir.write("old.txt", b"old style");
     // A key, generated, saved, not printed, then encrypt.
-    let run = dir.run(&["encrypt", "old.txt"], "k\ny\ny\nn\ny\n");
+    let run = dir.run(&["encrypt", "old.txt"], "ky\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains(PIPE_NOTE), "{}", run.stderr());
     assert!(dir.exists("old.txt.enc") && dir.exists(".local/share/encryptor/keys/old.txt.key"));
@@ -470,7 +470,7 @@ fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
     }
     let dir = Scratch::new("keys-folder");
     dir.write("a.txt", b"a");
-    let run = dir.run(&["encrypt", "a.txt"], "k\ny\ny\nn\ny\n");
+    let run = dir.run(&["encrypt", "a.txt"], "ky\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains("Key saved as: ~/.local/share/encryptor/keys/a.txt.key"), "{}", run.stderr());
     let keys = dir.path(".local/share/encryptor/keys");
@@ -491,11 +491,11 @@ fn encrypts_with_a_passphrase() {
         return;
     }
     let dir = Scratch::new("passphrase");
-    let phrase = "violet anchor quietly folds";
+    let phrase = "Violet anchor 7 folds!";
     dir.write("note.txt", b"meet at noon");
     dir.write(".bash_history", format!("ls\necho '{phrase}' > /dev/null\nECHO '{}'\n", phrase.to_uppercase()).as_bytes());
 
-    let run = dir.run(&["encrypt", "note.txt"], &format!("p\n{phrase}\n{phrase}\ny\n"));
+    let run = dir.run(&["encrypt", "note.txt"], &format!("ps\n{phrase}\n{phrase}\ny\n"));
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stdout().contains("from your passphrase with Argon2id"), "{}", run.stdout());
     let file = dir.read("note.txt.enc");
@@ -504,7 +504,7 @@ fn encrypts_with_a_passphrase() {
     // Removed from history exactly as typed, and not in other capitals.
     assert_eq!(dir.read(".bash_history"), format!("ls\nECHO '{}'\n", phrase.to_uppercase()).as_bytes());
 
-    let run = dir.run(&["decrypt", "note.txt.enc"], "violet anchor quietly fold\ny\n");
+    let run = dir.run(&["decrypt", "note.txt.enc"], "Violet anchor 7 fold!\ny\n");
     assert_eq!(run.code(), 3, "{}", run.stderr());
     assert!(run.stderr().contains("wrong passphrase"), "{}", run.stderr());
     assert!(!dir.exists("note.txt"));
@@ -514,17 +514,52 @@ fn encrypts_with_a_passphrase() {
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(dir.read("note.txt"), b"meet at noon");
 
+    // Never saved, anywhere: no file the runs left behind holds it.
+    let mut stack = vec![dir.0.clone()];
+    while let Some(folder) = stack.pop() {
+        for entry in fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let contents = fs::read(&path).unwrap();
+                assert!(!contents.windows(phrase.len()).any(|w| w == phrase.as_bytes()), "{}", path.display());
+            }
+        }
+    }
 }
 
 #[test]
-fn refuses_a_short_passphrase() {
+fn never_repeats_what_was_typed_at_the_key_prompt() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("no-echo");
+    dir.write("a.txt", b"a");
+    dir.encrypt("a.txt", "a.key");
+    // A passphrase typed where a key or key file was asked for.
+    let typed = "My.Secret/Phrase 9!";
+    let run = dir.run(&["decrypt", "a.txt.enc"], &format!("{typed}\n{typed}\n{typed}\n"));
+    assert_eq!(run.code(), 3, "{}", run.stderr());
+    assert!(run.stderr().contains("there's no key file at that path"), "{}", run.stderr());
+    assert!(!run.stderr().contains("Secret") && !run.stdout().contains("Secret"), "{}", run.stderr());
+}
+
+#[test]
+fn refuses_a_weak_passphrase() {
     if !runnable() {
         return;
     }
     let dir = Scratch::new("short-passphrase");
     dir.write("a.txt", b"a");
-    let run = dir.run(&["encrypt", "a.txt"], "p\nshort\nshort\nshort\n");
+    let run = dir.run(&["encrypt", "a.txt"], "ps\nshort\nlong enough but plain\nLong Enough 9 But Plain\n");
     assert_eq!(run.code(), 3, "{}", run.stderr());
     assert!(run.stderr().contains("too short: a passphrase needs at least 12 characters"), "{}", run.stderr());
+    assert!(run.stderr().contains("It also needs a capital, a number and a special character"), "{}", run.stderr());
+    assert!(run.stderr().contains("It also needs a special character"), "{}", run.stderr());
     assert!(dir.exists("a.txt") && !dir.exists("a.txt.enc"));
+    // The old one-letter answers aren't taken.
+    let run = dir.run(&["encrypt", "a.txt"], "k\nky\ny\ny\nn\ny\n");
+    assert!(run.stderr().contains("please answer ky or ps"), "{}", run.stderr());
+    assert_eq!(run.code(), 0, "{}", run.stderr());
 }

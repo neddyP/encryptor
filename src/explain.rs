@@ -608,20 +608,19 @@ pub fn hex_key_length(n: usize) -> String {
     }
 }
 
-/// Input that is neither a key nor a key file that could be opened.
+/// Input that is neither a key nor a key file that could be opened. Nothing
+/// typed is repeated, even when it looks like a path, as it could be a key or
+/// a passphrase typed at the wrong prompt, and the message could be going to
+/// a file.
 pub fn not_a_key(input: &str, path: &Path, e: &io::Error) -> String {
     if input.contains(['/', '.', '~']) {
+        let keys = crate::keys::folder().map_or_else(|| "the keys folder".into(), |dir| crate::term::home_path(&dir));
         return match e.kind() {
-            io::ErrorKind::NotFound => {
-                let keys = crate::keys::folder();
-                let keys = keys.map_or_else(|| "the keys folder".into(), |dir| crate::term::home_path(&dir));
-                format!(
-                    "there's no key file at {}, here or in {keys}, where new keys are saved. `ls {keys}` lists \
-                     the keys there.",
-                    safe_path(path)
-                )
-            }
-            _ => file(Action::Read, path, e).replace('\n', " "),
+            io::ErrorKind::NotFound => format!(
+                "there's no key file at that path, here or in {keys}, where new keys are saved. \
+                 `ls {keys}` lists the keys there."
+            ),
+            _ => format!("that key file can't be read: {}.", cause(Action::Read, path, e)),
         };
     }
     // Spaces, colons, dashes or a 0x prefix around an otherwise good key.

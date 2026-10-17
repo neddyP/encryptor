@@ -16,7 +16,7 @@ use crate::cli::Options;
 use crate::error::{Error, Result};
 use crate::explain::{self, Action};
 use crate::files::{self, clean_path};
-use crate::term::{self, Shown, choose, confirm, home_path, safe, safe_path};
+use crate::term::{self, Shown, choose, choose_coded, confirm, home_path, safe, safe_path};
 use crate::{history, kdf, protect, recording, session, wipe};
 
 /// Key bytes live on the heap, locked in RAM, so moving the handle never
@@ -118,7 +118,8 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
         return Ok((Secret::Key(key), KeySource::Generated { saved_to: Some(path), printed: Printed::No }));
     }
 
-    if choose("Use a 256-bit key or a custom passphrase?", &["passphrase", "key"])? == "passphrase" {
+    let kind = choose_coded("Use a 256-bit key or a custom passphrase?", &[("ky", "key"), ("ps", "passphrase")])?;
+    if kind == "passphrase" {
         return Ok((Secret::Passphrase(new_passphrase()?), KeySource::Passphrase));
     }
     if !confirm("Generate a random 256-bit key?")? {
@@ -159,15 +160,16 @@ pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) 
 }
 
 /// Asks for a new passphrase, twice, since it's hidden as it's typed and a
-/// typo would lock the file for good. It's kept as a key is: in locked
-/// memory, wiped when dropped.
+/// typo would lock the file for good. It's kept as a key is, in locked memory
+/// and wiped when dropped, and never saved or shown.
 fn new_passphrase() -> Result<Zeroizing<String>> {
     eprintln!("Anyone with the encrypted file can try guesses at the passphrase, so use a long");
-    eprintln!("one, such as five or more random words. Without it the file can't be decrypted.");
+    eprintln!("one, such as five or more random words. It needs at least {MIN_PASSPHRASE} characters, with");
+    eprintln!("a capital, a lowercase letter, a number and a special character such as ! or #.");
     for _ in 0..3 {
         let passphrase = term::read_secret("Enter a passphrase: ")?;
-        if passphrase.chars().count() < MIN_PASSPHRASE {
-            eprintln!("  That's too short: a passphrase needs at least {MIN_PASSPHRASE} characters.");
+        if let Some(problem) = weakness(&passphrase) {
+            eprintln!("  {problem}");
             continue;
         }
         let again = term::read_secret("Re-enter the passphrase to confirm: ")?;
@@ -178,8 +180,26 @@ fn new_passphrase() -> Result<Zeroizing<String>> {
     }
     Err(Error::KeyOrData(format!(
         "no passphrase after 3 attempts.\nRun encrypt again, with a passphrase of at least {MIN_PASSPHRASE} \
-         characters, or choose a key."
+         characters including a capital, a lowercase letter, a number and a special character, or choose a key."
     )))
+}
+
+/// What a new passphrase lacks, if anything: enough characters, and one each
+/// of a capital, a lowercase letter, a number and a special character, which
+/// is anything else but a space.
+fn weakness(passphrase: &str) -> Option<String> {
+    if passphrase.chars().count() < MIN_PASSPHRASE {
+        return Some(format!("That's too short: a passphrase needs at least {MIN_PASSPHRASE} characters."));
+    }
+    let kinds: [(&str, fn(char) -> bool); 4] = [
+        ("a capital", char::is_uppercase),
+        ("a lowercase letter", char::is_lowercase),
+        ("a number", char::is_numeric),
+        ("a special character, such as ! or #", |c| !c.is_alphanumeric() && !c.is_whitespace()),
+    ];
+    let missing: Vec<&str> =
+        kinds.iter().filter(|(_, has)| !passphrase.chars().any(*has)).map(|(kind, _)| *kind).collect();
+    (!missing.is_empty()).then(|| format!("It also needs {}.", explain::listed(&missing)))
 }
 
 /// Asks for the passphrase a file was encrypted with. `give_up` is the error
@@ -491,6 +511,17 @@ mod tests {
 
     use super::*;
     use crate::testing::Scratch;
+
+    #[test]
+    fn asks_passphrases_for_every_kind_of_character() {
+        assert_eq!(weakness("Violet anchor 7 folds!"), None);
+        assert_eq!(weakness("Ünïcode wörds 9 ‽"), None, "letters and symbols beyond ASCII count");
+        assert!(weakness("Sh0rt!").unwrap().contains("too short"));
+        assert_eq!(weakness("violet anchor 7 folds!").unwrap(), "It also needs a capital.");
+        let missing = weakness("Violet anchor folds").unwrap();
+        assert_eq!(missing, "It also needs a number and a special character, such as ! or #.");
+        assert!(weakness("VIOLET ANCHOR 7 FOLDS!").unwrap().contains("a lowercase letter"));
+    }
 
     #[test]
     fn parses_hex_keys() {

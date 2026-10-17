@@ -30,7 +30,7 @@ and `encryptor update` updates it either way; see [Install](#install).
   secure random generator, saved in a folder only you can open, away from
   your files, printed once, or both, and never shown unless you ask. Or your
   own key, as 64 hex characters or a 32-byte key file. Or a passphrase,
-  made into a key with Argon2id in locked memory.
+  made into a key with Argon2id in locked memory, and never saved or shown.
 - **Printed keys leave no trace.** A printed key goes straight to the
   terminal, never to standard output, on a screen with no scrollback, and is
   erased when you press Enter. Anything that would capture it, such as
@@ -308,7 +308,7 @@ them yourself once you've checked the encrypted file.
 
 ```
 $ encrypt report.pdf
-Use a 256-bit key or a custom passphrase? [p/k]: k
+Use a 256-bit key or a custom passphrase? [ky/ps]: ky
 Generate a random 256-bit key? [y/n]: y
 Key generated (not displayed).
 Save the key to a file in ~/.local/share/encryptor/keys? [y/n]: y
@@ -351,10 +351,12 @@ The prompts go in this order:
    without your password; on a Mac with FileVault off, the warning says so.
    It's only asked at a terminal: with `--yes`, or in a script, the warning
    is shown and encrypting goes ahead.
-1. **A key or a passphrase?** `k` goes on to the key questions below. `p`
-   asks for a passphrase of at least 12 characters, twice, as it isn't
-   shown, and skips them. Anyone with the encrypted file can try guesses at
-   a passphrase, so use a long one, such as five or more random words. It's
+1. **A key or a passphrase?** `ky` goes on to the key questions below. `ps`
+   asks for a passphrase, twice, as it isn't shown, and skips them: a
+   passphrase is never saved to a file or printed. It needs at least 12
+   characters, with a capital, a lowercase letter, a number and a special
+   character such as `!` or `#`. Anyone with the encrypted file can try
+   guesses at it, so use a long one, such as five or more random words. It's
    made into the key with Argon2id (7 MiB, 40 passes), in locked memory
    that's wiped afterwards, and the file is written in [format
    4](#file-format), which records those settings.

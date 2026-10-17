@@ -281,15 +281,21 @@ pub fn confirm(question: &str) -> Result<bool> {
 /// Asks until the answer is one of `options`, typed in full or as its first
 /// letter, and returns the chosen option.
 pub fn choose<'a>(question: &str, options: &[&'a str]) -> Result<&'a str> {
-    let letters: Vec<&str> = options.iter().map(|option| &option[..1]).collect();
-    let prompt = format!("{question} [{}]: ", letters.join("/"));
+    let coded: Vec<(&str, &str)> = options.iter().map(|option| (&option[..1], *option)).collect();
+    choose_coded(question, &coded)
+}
+
+/// `choose`, with each option's short answer given, as in [ky/ps], rather
+/// than its first letter.
+pub fn choose_coded<'a>(question: &str, options: &[(&str, &'a str)]) -> Result<&'a str> {
+    let codes: Vec<&str> = options.iter().map(|(code, _)| *code).collect();
+    let prompt = format!("{question} [{}]: ", codes.join("/"));
     loop {
         let answer = read_line(&prompt)?.to_ascii_lowercase();
-        let chosen = options.iter().copied().find(|option| answer == *option || answer == option[..1]);
-        if let Some(option) = chosen {
+        if let Some((_, option)) = options.iter().find(|(code, option)| answer == *code || answer == *option) {
             return Ok(option);
         }
-        eprintln!("  please answer {}", letters.join(" or "));
+        eprintln!("  please answer {}", codes.join(" or "));
     }
 }
 
