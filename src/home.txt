@@ -31,5 +31,5 @@
 		-o ~/PATH, --output ~/PATH  -->  writes the decrypted file to a specified location on your disk instead of next to the .enc file (decryption only)
 		--keep  -->  keeps the original unencrypted file rather than auto-deleting it post-encryption
 		--new-key ~/PATH  -->  encrypts file(s) with a new random key, and saves an example.pdf.key file to your desired location
-		-k, --key-file ~/PATH/example.pdf.key  -->  decrypts example.pdf.enc with its respective key file, or encrypts with an existing key file
+		-k, --key-file example.pdf.key  -->  decrypts example.pdf.enc with its respective key file, or encrypts with an existing key file
 		-v, --view  -->  views the file instead of decrypting it to disk, the same as encryptor view
