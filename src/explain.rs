@@ -163,61 +163,45 @@ pub fn special(path: &Path, kind: fs::FileType) -> String {
     format!("{shown} is {what}, not a regular file.\nSave what it holds to an ordinary file first, then use that.")
 }
 
-/// Explains that only one file can be encrypted at a time, with the commands
-/// to zip `paths` (a folder, or several files) into one file and encrypt it.
-pub fn zip_instead(paths: &[String]) -> String {
-    let (problem, archive, zip) = match paths {
-        [folder] => {
-            let name = Path::new(folder).file_name().map(|n| n.to_string_lossy().into_owned());
-            let archive = format!("{}.zip", name.as_deref().unwrap_or("folder"));
-            let zip = format!("  Zip the folder:    zip -r {} {}", quote(&archive), quote(folder));
-            (format!("{} is a folder.", safe(folder)), archive, zip)
-        }
-        _ => {
-            let files = paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ");
-            let files = if files.len() <= 60 { files } else { "FILE1 FILE2 ...".into() };
-            let zip = format!(
-                "  Zip the files:     zip -r files.zip {files}\n  \
-                   Zip a folder:      zip -r folder.zip FOLDER"
-            );
-            (format!("encrypt was given {} files.", paths.len()), "files.zip".into(), zip)
-        }
+/// A folder given without -r.
+pub fn folder_needs_r(command: &str, path: &Path) -> String {
+    let what = match command {
+        "encrypt" => "encrypt every file in it and in its subfolders",
+        _ => "decrypt every .enc file in it and in its subfolders, with one key for them all",
     };
-    format!(
-        "{problem}\n\
-         encrypt can't encrypt folders or multiple files, only one file at a time.\n\
-         Zip them into a single file, then encrypt that:\n\n\
-         {zip}\n  \
-         Encrypt the zip:   encrypt {}\n\n\
-         encrypt deletes the zip once it's encrypted, but not the originals: delete\n\
-         them yourself once you've checked the encrypted file.",
-        quote(&archive)
-    )
+    format!("{} is a folder.\nTo {what}, add -r:\n  {command} -r {}", safe_path(path), quote_path(path))
 }
 
-/// A folder given to decrypt.
-pub fn decrypt_folder(path: &Path) -> String {
-    let dir = path.to_string_lossy();
-    let dir = match dir.trim_end_matches('/') {
-        "" => "/",
-        trimmed => trimmed,
+/// Problems found with some of a batch's files before any key was made, so
+/// none were touched. Up to three are explained in full.
+pub fn batch_problems(command: &str, count: usize, problems: &[String]) -> String {
+    let shown: Vec<&str> = problems.iter().take(3).map(String::as_str).collect();
+    let more = match problems.len().saturating_sub(shown.len()) {
+        0 => String::new(),
+        n => format!("\n\n...and {n} more like these."),
     };
-    format!(
-        "{} is a folder.\ndecrypt works on one file at a time. To decrypt every .enc file in it, \
-         asking for each one's key in turn:\n  for f in {}/*.enc; do decrypt \"$f\"; done",
-        safe_path(path),
-        quote(dir)
-    )
+    let which = match problems.len() {
+        n if n == count => format!("none of the {count} files can be {command}ed"),
+        1 => format!("1 of the {count} files can't be {command}ed"),
+        n => format!("{n} of the {count} files can't be {command}ed"),
+    };
+    format!("{which}, so nothing was done:\n\n{}{more}\n\nFix or move them, then run {command} again.", shown.join("\n\n"))
 }
 
-/// More than one file given to decrypt.
-pub fn decrypt_one_at_a_time(paths: &[String]) -> String {
-    let files = paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ");
-    let files = if files.len() <= 50 { files } else { "*.enc".into() };
+/// One key for a batch of files that weren't all encrypted the same way.
+pub fn mixed_kinds(passphrases: usize, keys: usize, recursive: bool) -> String {
+    let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+    let fix = if recursive {
+        "decrypt -r needs one key or passphrase for every file. Decrypt the files without -r, naming them, and \
+         answer s for a separate key for each."
+    } else {
+        "Answer s to give each file its own key or passphrase, or decrypt the two kinds in separate runs."
+    };
     format!(
-        "decrypt was given {} files.\ndecrypt works on one file at a time. To decrypt several, \
-         asking for each one's key in turn:\n  for f in {files}; do decrypt \"$f\"; done",
-        paths.len()
+        "{} of these were encrypted with a passphrase and {} with a key, so one universal key can't open them \
+         all.\n{fix}",
+        files(passphrases),
+        files(keys)
     )
 }
 
@@ -367,20 +351,6 @@ pub fn key_beside_file(key: &Path) -> String {
         "WARNING: the key, {}, is in the same folder as the encrypted file, so anyone who gets a copy of \
          the folder gets both. Keep it somewhere else.",
         safe_path(key)
-    )
-}
-
-/// Argon2id's working memory, `len` bytes, couldn't be locked.
-pub fn passphrase_not_locked(len: u64) -> String {
-    let limit = match crate::protect::lock_limit() {
-        Some(limit) => format!(" This system lets a program lock {} (`ulimit -l`).", short_size(limit)),
-        None => String::new(),
-    };
-    format!(
-        "the {} a passphrase is turned into a key in couldn't be locked in memory. Written to swap, it \
-         would let guesses at the passphrase be checked cheaply, so nothing was done.{limit}\nClose \
-         other copies of encryptor and try again, or use a key instead of a passphrase.",
-        short_size(len)
     )
 }
 
@@ -647,16 +617,16 @@ pub fn not_a_key(input: &str, path: &Path, e: &io::Error) -> String {
         );
     }
     // Nearly a key: point to the first character that doesn't belong.
-    if (56..=72).contains(&input.chars().count()) {
-        if let Some((i, c)) = input.chars().enumerate().find(|(_, c)| !c.is_ascii_hexdigit()) {
-            let what = match c {
-                'o' | 'O' => "the letter O, where keys would have the digit 0",
-                'l' | 'I' => "a letter that looks like 1, where keys would have the digit 1",
-                c if c.is_alphabetic() => "a letter after f",
-                _ => "not 0-9 or a-f",
-            };
-            return format!("that isn't a valid key: character {} is {what}. Keys only use 0-9 and a-f.", i + 1);
-        }
+    if (56..=72).contains(&input.chars().count())
+        && let Some((i, c)) = input.chars().enumerate().find(|(_, c)| !c.is_ascii_hexdigit())
+    {
+        let what = match c {
+            'o' | 'O' => "the letter O, where keys would have the digit 0",
+            'l' | 'I' => "a letter that looks like 1, where keys would have the digit 1",
+            c if c.is_alphabetic() => "a letter after f",
+            _ => "not 0-9 or a-f",
+        };
+        return format!("that isn't a valid key: character {} is {what}. Keys only use 0-9 and a-f.", i + 1);
     }
     "that isn't a key or a key file. A key is 64 characters of 0-9 and a-f, as printed by encrypt; \
      a key file is a path such as report.pdf.key."
@@ -849,30 +819,20 @@ mod tests {
         assert!(unknown_command("--force", "USAGE").starts_with("unknown option '--force'. These are the options"));
         assert!(unknown_command("crypt", "USAGE").starts_with("unknown command 'crypt'"));
 
-        assert!(decrypt_folder(Path::new("My Files/")).ends_with("for f in 'My Files'/*.enc; do decrypt \"$f\"; done"));
-        let several = decrypt_one_at_a_time(&["a.enc".into(), "b c.enc".into()]);
-        assert!(several.ends_with("for f in a.enc 'b c.enc'; do decrypt \"$f\"; done"), "{several}");
+        assert!(folder_needs_r("decrypt", Path::new("My Files/")).ends_with("  decrypt -r 'My Files/'"));
+        assert!(folder_needs_r("encrypt", Path::new("docs")).contains("every file in it and in its subfolders"));
         assert!(output_exists(Path::new("report.pdf.enc")).ends_with("mv report.pdf.enc report.pdf.old.enc"));
     }
 
     #[test]
-    fn explains_how_to_zip_a_folder() {
-        let message = zip_instead(&["Holiday photos/".into()]);
-        assert!(message.starts_with("Holiday photos/ is a folder.\n"), "{message}");
-        assert!(message.contains("Zip the folder:    zip -r 'Holiday photos.zip' 'Holiday photos/'\n"));
-        assert!(message.contains("Encrypt the zip:   encrypt 'Holiday photos.zip'\n"));
-    }
-
-    #[test]
-    fn explains_how_to_zip_several_files() {
-        let message = zip_instead(&["a.txt".into(), "it's.pdf".into()]);
-        assert!(message.starts_with("encrypt was given 2 files.\n"), "{message}");
-        assert!(message.contains(r"Zip the files:     zip -r files.zip a.txt 'it'\''s.pdf'"));
-        assert!(message.contains("Zip a folder:      zip -r folder.zip FOLDER\n"));
-        assert!(message.contains("Encrypt the zip:   encrypt files.zip\n"));
-
-        let many: Vec<String> = (0..20).map(|i| format!("file-{i}.txt")).collect();
-        assert!(zip_instead(&many).contains("zip -r files.zip FILE1 FILE2 ...\n"));
+    fn explains_problems_with_a_batch() {
+        let problems: Vec<String> = (0..5).map(|i| format!("problem {i}")).collect();
+        let message = batch_problems("encrypt", 9, &problems);
+        assert!(message.starts_with("5 of the 9 files can't be encrypted, so nothing was done:"), "{message}");
+        assert!(message.contains("problem 2") && !message.contains("problem 3"));
+        assert!(message.contains("...and 2 more like these."));
+        assert!(batch_problems("decrypt", 2, &problems[..2]).starts_with("none of the 2 files can be decrypted"));
+        assert!(mixed_kinds(1, 2, true).starts_with("1 file of these were encrypted with a passphrase and 2 files"));
     }
 
     #[test]

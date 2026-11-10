@@ -38,6 +38,9 @@ unsafe impl GlobalAlloc for ZeroOnFree {
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LOCK_FAILED: AtomicBool = AtomicBool::new(false);
 static LOCKING_REQUIRED: AtomicBool = AtomicBool::new(false);
+/// Argon2id's working memory was too large to lock, so it was in ordinary
+/// memory while a passphrase was made into a key.
+static KDF_UNLOCKED: AtomicBool = AtomicBool::new(false);
 
 /// Stack locked below the caller by `lock_stack`: far more than decrypting,
 /// encrypting or drawing a screen takes.
@@ -108,6 +111,19 @@ pub fn lock(ptr: *const u8, len: usize) -> bool {
         return false;
     }
     true
+}
+
+/// Locks `len` bytes at `ptr` in RAM if the limit allows, without counting a
+/// failure against the run as `lock` does: for memory that may go unlocked,
+/// as Argon2id's may.
+pub fn try_lock(ptr: *const u8, len: usize) -> bool {
+    // SAFETY: as in `lock`.
+    len == 0 || unsafe { libc::mlock(ptr.cast(), len) } == 0
+}
+
+/// Records, for the report, that Argon2id's memory couldn't be locked.
+pub fn kdf_not_locked() {
+    KDF_UNLOCKED.store(true, Ordering::SeqCst);
 }
 
 /// Lets go of memory `lock` locked, once it's been wiped, so it doesn't count
@@ -189,6 +205,8 @@ pub fn lock_limit() -> Option<u64> {
     if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0 || limit.rlim_cur == libc::RLIM_INFINITY {
         return None;
     }
+    // rlim_t is 32 bits on some systems.
+    #[allow(clippy::unnecessary_cast)]
     Some(limit.rlim_cur as u64)
 }
 
@@ -245,10 +263,13 @@ fn stack_top() -> Option<usize> {
 
 /// Describes how secrets were held in memory, for the report.
 pub fn memory_status() -> &'static str {
-    if LOCK_FAILED.load(Ordering::SeqCst) {
-        "wiped after use; the file was too large to keep out of swap"
-    } else {
-        "kept in RAM (never swapped), wiped after use"
+    match (LOCK_FAILED.load(Ordering::SeqCst), KDF_UNLOCKED.load(Ordering::SeqCst)) {
+        (true, _) => "wiped after use; the file was too large to keep out of swap",
+        (false, true) => {
+            "kept in RAM (never swapped), wiped after use; the passphrase's Argon2id memory was too large to \
+             lock, so it was in ordinary memory, also wiped"
+        }
+        (false, false) => "kept in RAM (never swapped), wiped after use",
     }
 }
 

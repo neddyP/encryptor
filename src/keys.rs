@@ -48,14 +48,35 @@ impl Secret {
         }
     }
 
-    /// The key for a file with `header`: the key itself, or the passphrase's,
-    /// made with the settings and salt in the header.
-    pub fn key_for(self, header: &[u8]) -> Result<SecretKey> {
+    /// The key for a file with `header`: a copy of the key itself, or the
+    /// passphrase's, made with the settings and salt in the header. A copy,
+    /// so one secret can encrypt several files.
+    pub fn key_for(&self, header: &[u8]) -> Result<SecretKey> {
         match self {
-            Self::Key(key) => Ok(key),
+            Self::Key(key) => Ok(copy(key)),
             Self::Passphrase(passphrase) => kdf::key_for(passphrase.as_bytes(), header),
         }
     }
+}
+
+/// A copy of `key`, locked in RAM and zeroed when dropped like the original.
+pub fn copy(key: &[u8; KEY_LEN]) -> SecretKey {
+    let mut copy = new_key();
+    copy.copy_from_slice(key);
+    copy
+}
+
+/// What to encrypt with: a key or a passphrase.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind {
+    Key,
+    Passphrase,
+}
+
+/// Asks whether to use a key or a passphrase.
+pub fn choose_kind() -> Result<Kind> {
+    let kind = choose_coded("Use a 256-bit key or a custom passphrase?", &[("ky", "key"), ("ps", "passphrase")])?;
+    Ok(if kind == "passphrase" { Kind::Passphrase } else { Kind::Key })
 }
 
 pub enum KeySource {
@@ -82,17 +103,18 @@ pub enum Printed {
 pub struct UnusedKeyFile(Option<PathBuf>);
 
 impl UnusedKeyFile {
-    pub fn keep(mut self) {
+    /// Keeps the key file: it has encrypted a file.
+    pub fn keep(&mut self) {
         self.0 = None;
     }
 }
 
 impl Drop for UnusedKeyFile {
     fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            if wipe::shred(path).is_ok() {
-                eprintln!("Shredded unused key file {}", safe_path(path));
-            }
+        if let Some(path) = &self.0
+            && wipe::shred(path).is_ok()
+        {
+            eprintln!("Shredded unused key file {}", safe_path(path));
         }
     }
 }
@@ -101,71 +123,154 @@ impl Drop for UnusedKeyFile {
 /// saved to `--new-key`, or else a passphrase or a key, as the user chooses:
 /// a new random key, saved or printed, or one they enter.
 pub fn establish(input: &Path, key_file: &mut UnusedKeyFile, options: &Options) -> Result<(Secret, KeySource)> {
+    if let Some(given) = from_options(input, key_file, options)? {
+        return Ok(given);
+    }
+    let kind = choose_kind()?;
+    establish_kind(kind, input, key_file)
+}
+
+/// The key `--key-file` or `--new-key` says to use, if either was given. A
+/// new key in a folder is named after `input`.
+pub fn from_options(
+    input: &Path,
+    key_file: &mut UnusedKeyFile,
+    options: &Options,
+) -> Result<Option<(Secret, KeySource)>> {
     if let Some(path) = &options.key_file {
         let key = read_key_file(path)?;
-        return Ok((Secret::Key(key), KeySource::FromFile { path: path.clone() }));
+        return Ok(Some((Secret::Key(key), KeySource::FromFile { path: path.clone() })));
     }
-    if let Some(destination) = &options.new_key {
-        let key = generate()?;
-        let path = match destination.is_dir() {
-            true => write_key_file(&key, input, destination)?,
-            false => write_key_file_at(&key, destination)?,
-        };
-        key_file.0 = Some(path.clone());
-        if beside(&path, input) {
-            eprintln!("{}", explain::key_beside_file(&path));
-        }
-        return Ok((Secret::Key(key), KeySource::Generated { saved_to: Some(path), printed: Printed::No }));
+    let Some(destination) = &options.new_key else { return Ok(None) };
+    let key = generate()?;
+    let path = match destination.is_dir() {
+        true => write_key_file(&key, input, destination)?,
+        false => write_key_file_at(&key, destination)?,
+    };
+    key_file.0 = Some(path.clone());
+    if beside(&path, input) {
+        eprintln!("{}", explain::key_beside_file(&path));
     }
+    Ok(Some((Secret::Key(key), KeySource::Generated { saved_to: Some(path), printed: Printed::No })))
+}
 
-    let kind = choose_coded("Use a 256-bit key or a custom passphrase?", &[("ky", "key"), ("ps", "passphrase")])?;
-    if kind == "passphrase" {
-        return Ok((Secret::Passphrase(new_passphrase()?), KeySource::Passphrase));
+/// Gets a passphrase, or a key: a new random one, saved or printed, or one
+/// the user enters. A saved key is named after `input`.
+pub fn establish_kind(kind: Kind, input: &Path, key_file: &mut UnusedKeyFile) -> Result<(Secret, KeySource)> {
+    if kind == Kind::Passphrase {
+        return Ok((Secret::Passphrase(new_passphrase(true)?), KeySource::Passphrase));
     }
     if !confirm("Generate a random 256-bit key?")? {
-        let give_up = "no valid key after 3 attempts.\nRun encrypt again and answer y to have a random \
-                       key generated, or enter a key of 64 characters, 0-9 and a-f.";
-        let (key, _) = prompt(true, give_up)?;
-        return Ok((Secret::Key(key), KeySource::Entered));
+        return enter_new_key();
     }
 
     let key = generate()?;
     eprintln!("Key generated (not displayed).");
 
     let mut saved_to = None;
-    let place = folder().map_or_else(|| "your keys folder".into(), |dir| home_path(&dir));
-    if confirm(&format!("Save the key to a file in {place}?"))? {
+    if confirm(&format!("Save the key to a file in {}?", place()))? {
         saved_to = Some(save(&key, input, key_file)?);
     }
-    let mut printed = if confirm("Print the key?")? { print(&key)? } else { Printed::No };
+    let printed = if confirm("Print the key?")? { print(&key, None)? } else { Printed::No };
+    let (saved_to, printed) = kept_somewhere(&key, input, key_file, saved_to, printed, None)?;
+    Ok((Secret::Key(key), KeySource::Generated { saved_to, printed }))
+}
 
-    // A key that is neither saved nor printed is gone once the program exits,
-    // and the file with it, so one of the two is required.
-    if saved_to.is_none() && printed == Printed::No {
-        eprintln!();
-        eprintln!("WARNING: the key is neither saved nor printed, so once this program exits,");
-        eprintln!("the encrypted file could never be decrypted.");
-        loop {
-            if choose("Print or save the key?", &["print", "save"])? == "save" {
-                saved_to = Some(save(&key, input, key_file)?);
-                break;
-            }
-            printed = print(&key)?;
-            if printed != Printed::No {
-                break;
-            }
+/// A key the user enters for a new file, twice if it's typed.
+pub fn enter_new_key() -> Result<(Secret, KeySource)> {
+    let give_up = "no valid key after 3 attempts.\nRun encrypt again and answer y to have a random \
+                   key generated, or enter a key of 64 characters, 0-9 and a-f.";
+    let (key, _) = prompt(true, give_up)?;
+    Ok((Secret::Key(key), KeySource::Entered))
+}
+
+/// How each file of a batch gets a random key of its own: saved, printed or
+/// both, asked once for them all.
+#[derive(Clone, Copy)]
+pub struct Recipe {
+    pub save: bool,
+    pub print: bool,
+}
+
+/// Asks how a batch of `count` files with a key each gets its keys: random
+/// ones, saved or printed, or else (`None`) ones the user enters.
+pub fn choose_recipe(count: usize) -> Result<Option<Recipe>> {
+    if !confirm(&format!("Generate a random 256-bit key for each of the {count} files?"))? {
+        return Ok(None);
+    }
+    let save = confirm(&format!("Save each key to a file in {}, named after its file?", place()))?;
+    let print = confirm("Print each key?")?;
+    if save || print {
+        return Ok(Some(Recipe { save, print }));
+    }
+    // As for one file, a key neither saved nor printed would lose its file.
+    eprintln!();
+    eprintln!("WARNING: keys neither saved nor printed are lost once this program exits, and");
+    eprintln!("their files could never be decrypted.");
+    let save = choose("Print or save each key?", &["print", "save"])? == "save";
+    Ok(Some(Recipe { save, print: !save }))
+}
+
+/// A new random key for `input`, one file of a batch, saved and printed as
+/// `recipe` says.
+pub fn generate_for(input: &Path, recipe: Recipe, key_file: &mut UnusedKeyFile) -> Result<(Secret, KeySource)> {
+    let key = generate()?;
+    let name = input.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let saved_to = if recipe.save { Some(save(&key, input, key_file)?) } else { None };
+    let printed = if recipe.print { print(&key, Some(&name))? } else { Printed::No };
+    let (saved_to, printed) = kept_somewhere(&key, input, key_file, saved_to, printed, Some(&name))?;
+    Ok((Secret::Key(key), KeySource::Generated { saved_to, printed }))
+}
+
+/// A new passphrase for one file of a batch, named `label`.
+pub fn passphrase_for(label: &str, first: bool) -> Result<(Secret, KeySource)> {
+    eprintln!("Passphrase for {}:", safe(label));
+    Ok((Secret::Passphrase(new_passphrase(first)?), KeySource::Passphrase))
+}
+
+/// A key that is neither saved nor printed is gone once the program exits,
+/// and the file with it, so one of the two is required: asks until it's
+/// done, if it isn't yet.
+fn kept_somewhere(
+    key: &[u8; KEY_LEN],
+    input: &Path,
+    key_file: &mut UnusedKeyFile,
+    saved_to: Option<PathBuf>,
+    printed: Printed,
+    label: Option<&str>,
+) -> Result<(Option<PathBuf>, Printed)> {
+    if saved_to.is_some() || printed != Printed::No {
+        return Ok((saved_to, printed));
+    }
+    eprintln!();
+    eprintln!("WARNING: the key is neither saved nor printed, so once this program exits,");
+    eprintln!("the encrypted file could never be decrypted.");
+    loop {
+        if choose("Print or save the key?", &["print", "save"])? == "save" {
+            return Ok((Some(save(key, input, key_file)?), Printed::No));
+        }
+        let printed = print(key, label)?;
+        if printed != Printed::No {
+            return Ok((None, printed));
         }
     }
-    Ok((Secret::Key(key), KeySource::Generated { saved_to, printed }))
+}
+
+/// The keys folder, as the questions name it.
+fn place() -> String {
+    folder().map_or_else(|| "your keys folder".into(), |dir| home_path(&dir))
 }
 
 /// Asks for a new passphrase, twice, since it's hidden as it's typed and a
 /// typo would lock the file for good. It's kept as a key is, in locked memory
-/// and wiped when dropped, and never saved or shown.
-fn new_passphrase() -> Result<Zeroizing<String>> {
-    eprintln!("Anyone with the encrypted file can try guesses at the passphrase, so use a long");
-    eprintln!("one, such as five or more random words. It needs at least {MIN_PASSPHRASE} characters, with");
-    eprintln!("a capital, a lowercase letter, a number and a special character such as ! or #.");
+/// and wiped when dropped, and never saved or shown. With `advice`, first says
+/// what makes a good one.
+fn new_passphrase(advice: bool) -> Result<Zeroizing<String>> {
+    if advice {
+        eprintln!("Anyone with the encrypted file can try guesses at the passphrase, so use a long");
+        eprintln!("one, such as five or more random words. It needs at least {MIN_PASSPHRASE} characters, with");
+        eprintln!("a capital, a lowercase letter, a number and a special character such as ! or #.");
+    }
     for _ in 0..3 {
         let passphrase = term::read_secret("Enter a passphrase: ")?;
         if let Some(problem) = weakness(&passphrase) {
@@ -191,7 +296,8 @@ fn weakness(passphrase: &str) -> Option<String> {
     if passphrase.chars().count() < MIN_PASSPHRASE {
         return Some(format!("That's too short: a passphrase needs at least {MIN_PASSPHRASE} characters."));
     }
-    let kinds: [(&str, fn(char) -> bool); 4] = [
+    type Rule = (&'static str, fn(char) -> bool);
+    let kinds: [Rule; 4] = [
         ("a capital", char::is_uppercase),
         ("a lowercase letter", char::is_lowercase),
         ("a number", char::is_numeric),
@@ -271,8 +377,8 @@ fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Resu
 
 /// Shows the key on the terminal and erases it afterwards, or explains why it
 /// can't be shown here. If anything is recording the session, says what and
-/// asks first.
-fn print(key: &[u8; KEY_LEN]) -> Result<Printed> {
+/// asks first. `label` names the file it's for, in a batch.
+fn print(key: &[u8; KEY_LEN], label: Option<&str>) -> Result<Printed> {
     let captured_by = recording::warn(&recording::scan());
     if let Some(by) = &captured_by {
         // Only someone at the keyboard can agree to this, not an answer piped
@@ -288,7 +394,7 @@ fn print(key: &[u8; KEY_LEN]) -> Result<Printed> {
             return Ok(Printed::No);
         }
     }
-    match term::show_key(key)? {
+    match term::show_key(key, label)? {
         Shown::Yes => match captured_by {
             Some(by) => {
                 eprintln!("Key shown, then erased from the screen, but {by} captured it.");

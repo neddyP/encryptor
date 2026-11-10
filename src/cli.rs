@@ -1,4 +1,4 @@
-//! The command line: which command, which file, and options that answer the
+//! The command line: which command, which files, and options that answer the
 //! command's questions in advance, so scripts never answer them by position.
 
 use std::path::PathBuf;
@@ -24,6 +24,8 @@ pub struct Options {
     pub yes: bool,
     /// Don't print the report.
     pub quiet: bool,
+    /// Take in every file in the folders given, and in their subfolders.
+    pub recursive: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -41,7 +43,8 @@ pub enum Command {
 
 pub struct Invocation {
     pub command: Command,
-    pub file: Option<String>,
+    /// The files and folders given, in order.
+    pub files: Vec<String>,
     pub options: Options,
 }
 
@@ -81,7 +84,7 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
             "--new-key" => options.new_key = Some(path()?),
             "-o" | "--output" => options.output = Some(path()?),
             "-h" | "--help" | "-V" | "--version" | "-v" | "--view" | "--keep" | "--overwrite" | "-y" | "--yes"
-            | "-q" | "--quiet"
+            | "-q" | "--quiet" | "-r" | "--recursive"
                 if inline.is_some() =>
             {
                 return Err(Error::Usage(format!("{name} doesn't take a value")));
@@ -93,6 +96,7 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
             "--overwrite" => options.overwrite = true,
             "-y" | "--yes" => options.yes = true,
             "-q" | "--quiet" => options.quiet = true,
+            "-r" | "--recursive" => options.recursive = true,
             _ => return Err(Error::Usage(explain::unknown_command(name, usage))),
         }
     }
@@ -114,19 +118,20 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
     };
     let files: Vec<String> = words.into_iter().skip(usize::from(named.is_some())).collect();
     if matches!(command, Command::Help | Command::Version) {
-        return Ok(Invocation { command, file: None, options });
+        return Ok(Invocation { command, files: Vec::new(), options });
     }
     if command == Command::Update && !files.is_empty() {
         return Err(Error::Usage("update doesn't take a file. Run it on its own: encryptor update".into()));
     }
-    if files.len() > 1 {
-        return Err(Error::Usage(match command {
-            Command::Decrypt => explain::decrypt_one_at_a_time(&files),
-            Command::View => format!("view was given {} files; it shows one at a time.", files.len()),
-            _ => explain::zip_instead(&files),
-        }));
+    if command == Command::View && files.len() > 1 {
+        return Err(Error::Usage(format!("view was given {} files; it shows one at a time.", files.len())));
     }
-    Ok(Invocation { command, file: files.into_iter().next(), options })
+    if options.output.is_some() && (files.len() > 1 || options.recursive) {
+        return Err(Error::Usage(
+            "--output names one decrypted file. With several, each is decrypted next to its .enc file.".into(),
+        ));
+    }
+    Ok(Invocation { command, files, options })
 }
 
 /// The command a word names, if it names one.
@@ -158,7 +163,8 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
         || options.keep
         || options.overwrite
         || options.yes
-        || options.quiet;
+        || options.quiet
+        || options.recursive;
     match command {
         Command::Update if any => {
             Err(Error::Usage("update doesn't take options. Run it on its own: encryptor update".into()))
@@ -170,7 +176,12 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
             Err(Error::Usage("--keep only applies to encrypt: decrypt always keeps the encrypted file".into()))
         }
         Command::View
-            if options.new_key.is_some() || options.output.is_some() || options.keep || options.overwrite || options.yes =>
+            if options.new_key.is_some()
+                || options.output.is_some()
+                || options.keep
+                || options.overwrite
+                || options.yes
+                || options.recursive =>
         {
             Err(Error::Usage("view only takes --key-file and --quiet; it asks everything else at the keyboard".into()))
         }
@@ -197,7 +208,7 @@ mod tests {
     fn reads_options_anywhere() {
         let run = parsed(&["encrypt", "--keep", "report.pdf", "--new-key", "k.key", "-y"]).unwrap();
         assert!(run.command == Command::Encrypt);
-        assert_eq!(run.file.as_deref(), Some("report.pdf"));
+        assert_eq!(run.files, ["report.pdf"]);
         assert_eq!(run.options.new_key, Some(PathBuf::from("k.key")));
         assert!(run.options.keep && run.options.yes && !run.options.quiet);
 
@@ -211,7 +222,7 @@ mod tests {
     #[test]
     fn takes_names_after_a_double_dash() {
         let run = parsed(&["encrypt", "--", "-odd name"]).unwrap();
-        assert_eq!(run.file.as_deref(), Some("-odd name"));
+        assert_eq!(run.files, ["-odd name"]);
     }
 
     #[test]
@@ -229,10 +240,10 @@ mod tests {
         for args in views {
             let run = parsed(args).unwrap_or_else(|_| panic!("{args:?}"));
             assert!(run.command == Command::View, "{args:?}");
-            assert_eq!(run.file.as_deref(), Some("a.enc"), "{args:?}");
+            assert_eq!(run.files, ["a.enc"], "{args:?}");
         }
         assert!(parsed(&["-v"]).unwrap().command == Command::View);
-        assert!(parsed(&["view"]).unwrap().file.is_none());
+        assert!(parsed(&["view"]).unwrap().files.is_empty());
         assert!(usage_error(parsed(&["encrypt", "-v", "a"])).contains("can't be used with encrypt"));
         assert!(usage_error(parsed(&["--view=x", "a"])).contains("doesn't take a value"));
         assert!(usage_error(parsed(&["view", "a", "b"])).contains("view was given 2 files"));
@@ -245,9 +256,24 @@ mod tests {
             Options { new_key: Some("n".into()), ..Options::default() },
             Options { keep: true, ..Options::default() },
             Options { overwrite: true, ..Options::default() },
+            Options { recursive: true, ..Options::default() },
         ] {
             assert!(matches!(check(Command::View, &refused), Err(Error::Usage(_))));
         }
+    }
+
+    #[test]
+    fn takes_several_files_and_folders() {
+        let run = parsed(&["encrypt", "a.pdf", "b.md", "c.xlsx"]).unwrap();
+        assert!(run.command == Command::Encrypt && !run.options.recursive);
+        assert_eq!(run.files, ["a.pdf", "b.md", "c.xlsx"]);
+        let run = parsed(&["decrypt", "-r", "docs", "more"]).unwrap();
+        assert!(run.command == Command::Decrypt && run.options.recursive);
+        assert_eq!(run.files, ["docs", "more"]);
+        assert!(parsed(&["encrypt", "--recursive", "docs"]).unwrap().options.recursive);
+        let recursive = Options { recursive: true, ..Options::default() };
+        assert!(check(Command::Encrypt, &recursive).is_ok() && check(Command::Decrypt, &recursive).is_ok());
+        assert!(matches!(check(Command::Update, &recursive), Err(Error::Usage(_))));
     }
 
     #[test]
@@ -265,8 +291,9 @@ mod tests {
         assert!(usage_error(parsed(&["encrypt", "--key-file="])).contains("needs a path"));
         assert!(usage_error(parsed(&["encrypt", "--yes=no", "f"])).contains("doesn't take a value"));
         assert!(usage_error(parsed(&["encrypt", "--force", "f"])).contains("unknown option '--force'"));
-        assert!(usage_error(parsed(&["encrypt", "a", "b"])).contains("encrypt was given 2 files"));
-        assert!(usage_error(parsed(&["decrypt", "a", "b"])).contains("decrypt was given 2 files"));
+        assert!(usage_error(parsed(&["decrypt", "a.enc", "b.enc", "-o", "x"])).contains("--output names one"));
+        assert!(usage_error(parsed(&["decrypt", "-r", "docs", "-o", "x"])).contains("--output names one"));
+        assert!(usage_error(parsed(&["encrypt", "--recursive=yes", "docs"])).contains("doesn't take a value"));
 
         let both = Options { key_file: Some("a".into()), new_key: Some("b".into()), ..Options::default() };
         assert!(matches!(check(Command::Encrypt, &both), Err(Error::Usage(_))));

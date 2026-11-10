@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -84,7 +84,7 @@ pub enum Shown {
 /// erased, the session's art and what was done so far are drawn again.
 /// Everything is written straight to the terminal device, so the key never
 /// goes through standard output and can't end up in a redirected file.
-pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
+pub fn show_key(key: &[u8; 32], label: Option<&str>) -> Result<Shown> {
     let mut tty = match open_screen() {
         Ok(tty) => tty,
         Err(reason) => return Ok(Shown::Unavailable(reason)),
@@ -103,7 +103,10 @@ pub fn show_key(key: &[u8; 32]) -> Result<Shown> {
     let raw = RawMode::enter(fd)?;
     let shown = tty
         .write_all(open)
-        .and_then(|()| tty.write_all(b"Your encryption key (shown once):\r\n\r\n    "))
+        .and_then(|()| match label {
+            Some(name) => tty.write_all(format!("Your encryption key for {} (shown once):\r\n\r\n    ", safe(name)).as_bytes()),
+            None => tty.write_all(b"Your encryption key (shown once):\r\n\r\n    "),
+        })
         .and_then(|()| tty.write_all(&hex[..]))
         .and_then(|()| {
             tty.write_all(
@@ -159,43 +162,6 @@ pub fn size(fd: libc::c_int) -> Option<(usize, usize)> {
 pub fn press_enter() -> Result<()> {
     let _raw = RawMode::enter(libc::STDIN_FILENO)?;
     wait_for_enter(libc::STDIN_FILENO)
-}
-
-/// A progress line on standard error for long jobs, shown only on a terminal
-/// and for large files, and cleared when dropped.
-pub struct Progress {
-    label: &'static str,
-    total: u64,
-    shown: bool,
-    last: Instant,
-}
-
-impl Progress {
-    pub fn new(label: &'static str, total: u64) -> Self {
-        let shown = total >= 64 << 20 && io::stderr().is_terminal();
-        Self { label, total, shown, last: Instant::now() }
-    }
-
-    /// Whether the line is being shown at all.
-    pub fn shown(&self) -> bool {
-        self.shown
-    }
-
-    pub fn update(&mut self, done: u64) {
-        if !self.shown || self.last.elapsed() < Duration::from_millis(250) {
-            return;
-        }
-        self.last = Instant::now();
-        eprint!("\r{} {:>3}% of {}\x1b[K", self.label, done * 100 / self.total, short_size(self.total));
-    }
-}
-
-impl Drop for Progress {
-    fn drop(&mut self) {
-        if self.shown {
-            eprint!("\r\x1b[K");
-        }
-    }
 }
 
 pub fn short_size(bytes: u64) -> String {

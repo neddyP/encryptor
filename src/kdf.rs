@@ -1,7 +1,8 @@
-//! Keys from passphrases, with Argon2id. Its working memory is held to the
-//! same rules as a key: locked in RAM, and wiped and unlocked once the key is
-//! made. Written to swap, it would let guesses at the passphrase be checked
-//! without paying the memory and time Argon2id is there to charge.
+//! Keys from passphrases, with Argon2id. Its working memory is locked in RAM
+//! where the system allows that much, and wiped once the key is made. It's
+//! usually more than a program may lock (often 8 MiB), and then it's held in
+//! ordinary memory for the half second it takes: making it large is what
+//! makes each guess at the passphrase expensive on graphics cards.
 
 use argon2::{Algorithm, Argon2, Block, Version};
 use zeroize::{Zeroize, Zeroizing};
@@ -19,10 +20,10 @@ pub struct Params {
     pub lanes: u32,
 }
 
-/// The settings new files get. 7 MiB fits in the 8 MiB Linux often lets a
-/// program lock, with room for the rest of the run, so the passes make up the
-/// cost instead: 40 take about a fifth of a second on a recent laptop.
-pub const DEFAULT: Params = Params { memory_kib: 7 * 1024, passes: 40, lanes: 1 };
+/// The settings new files get: 256 MiB, as the age tool's scrypt uses, so a
+/// graphics card can only test a few guesses at once, and 3 passes, about
+/// half a second on a recent desktop.
+pub const DEFAULT: Params = Params { memory_kib: 256 * 1024, passes: 3, lanes: 1 };
 
 /// The most a header may ask for, so a damaged or crafted one can't demand
 /// days of work or more memory than any computer has.
@@ -84,14 +85,17 @@ pub fn derive(passphrase: &[u8], params: &Params, salt: &[u8]) -> Result<SecretK
     let mut blocks = Zeroizing::new(Vec::new());
     blocks.try_reserve_exact(count).map_err(|_| explain::no_memory(bytes as u64))?;
     blocks.resize(count, Block::new());
-    if !protect::lock(blocks.as_ptr().cast(), bytes) {
-        return Err(Error::Message(explain::passphrase_not_locked(bytes as u64)));
+    let locked = protect::try_lock(blocks.as_ptr().cast(), bytes);
+    if !locked {
+        protect::kdf_not_locked();
     }
     let mut key = keys::new_key();
     let hashed = argon.hash_password_into_with_memory(passphrase, salt, &mut key[..], &mut blocks[..]);
     // Wiped while still locked, then let go, so later buffers can be locked.
     blocks.zeroize();
-    protect::unlock(blocks.as_ptr().cast(), bytes);
+    if locked {
+        protect::unlock(blocks.as_ptr().cast(), bytes);
+    }
     hashed.map_err(|e| Error::Message(format!("couldn't make a key from the passphrase: {e}")))?;
     Ok(key)
 }
@@ -102,22 +106,8 @@ mod tests {
 
     const SALT: [u8; 32] = [7; 32];
 
-    /// Whether this system lets these tests lock their Argon2id memory, as
-    /// well as what the tests running alongside lock. Some build containers
-    /// allow only 64 KiB.
-    fn can_lock() -> bool {
-        let enough = protect::lock_limit().is_none_or(|limit| limit >= 1 << 20);
-        if !enough {
-            eprintln!("skipping: this system lets a program lock too little memory (ulimit -l)");
-        }
-        enough
-    }
-
     #[test]
     fn makes_the_same_key_from_the_same_passphrase_only() {
-        if !can_lock() {
-            return;
-        }
         let small = Params { memory_kib: 64, passes: 1, lanes: 1 };
         let key = derive(b"correct horse battery staple", &small, &SALT).unwrap();
         assert_eq!(**key, **derive(b"correct horse battery staple", &small, &SALT).unwrap());
@@ -129,9 +119,6 @@ mod tests {
 
     #[test]
     fn matches_the_reference_argon2id() {
-        if !can_lock() {
-            return;
-        }
         // Made with Python's `cryptography` package: Argon2id version 19,
         // 32 KiB, 3 passes, 4 lanes, a password of 32 bytes of 1 and a salt
         // of 16 bytes of 2.
@@ -148,6 +135,7 @@ mod tests {
         assert_eq!(Params::from_bytes(&Params { passes: 0, ..DEFAULT }.to_bytes()), None);
         assert_eq!(Params::from_bytes(&Params { lanes: 0, ..DEFAULT }.to_bytes()), None);
         assert_eq!(Params::from_bytes(&DEFAULT.to_bytes()[..8]), None);
-        assert_eq!(DEFAULT.summary(), "Argon2id, 7.0 MiB, 40 passes");
+        assert_eq!(DEFAULT.summary(), "Argon2id, 256.0 MiB, 3 passes");
+        assert_eq!(Params::from_bytes(&DEFAULT.to_bytes()).map(|p| p.memory_kib), Some(256 * 1024));
     }
 }

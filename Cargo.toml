@@ -20,3 +20,12 @@ zeroize = "1.9.0"
 [profile.release]
 lto = true
 strip = true
+
+# Argon2id takes 256 MiB and several passes for every passphrase, which
+# unoptimised takes many seconds, so it's optimised in debug builds and tests
+# too.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

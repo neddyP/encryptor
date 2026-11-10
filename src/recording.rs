@@ -159,15 +159,15 @@ fn examine(pid: u32, client: Option<&str>, found: &mut Vec<Recorder>) {
 
     let (mut pid, mut p) = (pid, first);
     for _ in 0..MAX_ANCESTORS {
-        if let Some((name, what)) = recorder_named(&p.names) {
-            if !(name == "script" && records_nothing(pid)) {
-                let mut details: Vec<String> = client
-                    .map(|tty| format!("the tmux client on {tty} runs inside it and shows this pane"))
-                    .into_iter()
-                    .collect();
-                details.extend(writing_to(pid));
-                found.push(Recorder { program: name.into(), pid: Some(pid), what: what.into(), details });
-            }
+        if let Some((name, what)) = recorder_named(&p.names)
+            && !(name == "script" && records_nothing(pid))
+        {
+            let mut details: Vec<String> = client
+                .map(|tty| format!("the tmux client on {tty} runs inside it and shows this pane"))
+                .into_iter()
+                .collect();
+            details.extend(writing_to(pid));
+            found.push(Recorder { program: name.into(), pid: Some(pid), what: what.into(), details });
         }
         if p.ppid == 0 || p.ppid == pid {
             break;

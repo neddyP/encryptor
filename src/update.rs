@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
-use crate::{explain, protect, timestamps};
+use crate::{explain, protect};
 
 /// install.sh as of this release.
 const INSTALL_SCRIPT: &str = include_str!("../install.sh");
@@ -22,6 +22,9 @@ const INSTALL_SCRIPT: &str = include_str!("../install.sh");
 const INSTALL_DIR: &str = "/usr/local/bin";
 const USER_INSTALL_DIR: &str = ".local/bin";
 const PACKAGE: &str = "@neddyp/encryptor@latest";
+/// Set by the npm package's launcher: the Node.js that ran it, so the npm
+/// beside it can be found.
+const NODE_VAR: &str = "ENCRYPTOR_NODE";
 
 /// How this copy was installed, as told by where its binary is.
 #[derive(Debug, PartialEq)]
@@ -93,7 +96,7 @@ fn install_of(exe: &Path, home: Option<&Path>) -> Install {
 /// the npm beside the Node.js that ran the package's launcher, with that
 /// Node.js first on the PATH for npm's own `#!/usr/bin/env node`.
 fn npm(prefix: &Path) -> Command {
-    let node_dir = std::env::var_os(timestamps::NODE_VAR)
+    let node_dir = std::env::var_os(NODE_VAR)
         .map(PathBuf::from)
         .and_then(|node| node.parent().map(Path::to_path_buf));
     let npm = node_dir.as_ref().map(|dir| dir.join("npm")).filter(|npm| npm.exists());

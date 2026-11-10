@@ -30,7 +30,8 @@ and `encryptor update` updates it either way; see [Install](#install).
   secure random generator, saved in a folder only you can open, away from
   your files, printed once, or both, and never shown unless you ask. Or your
   own key, as 64 hex characters or a 32-byte key file. Or a passphrase,
-  made into a key with Argon2id in locked memory, and never saved or shown.
+  made into a key with Argon2id using 256 MiB of memory, and never saved or
+  shown.
 - **Printed keys leave no trace.** A printed key goes straight to the
   terminal, never to standard output, on a screen with no scrollback, and is
   erased when you press Enter. Anything that would capture it, such as
@@ -51,17 +52,13 @@ and `encryptor update` updates it either way; see [Install](#install).
   can't read its memory. Unused key files and partial or rejected output are
   zeroed before they're deleted, temporary files have random names, and
   there are no logs.
-- **No trace on the desktop or in shell history.** On Linux, the original's
-  thumbnails and its recently used entry are removed. Every run removes the
-  bash, zsh and fish history entries that ran the tool or hold a key it used,
-  including macOS Terminal's history for each window, and zeroes what's cut.
-- **Its own files don't show when it ran.** Its last-read times are set back
-  to when it was installed, with npm's files and Node.js's too, and the
-  folders a run writes in get their modified times back.
+- **No copies of the original or the key left behind.** On Linux, the
+  original's thumbnails, small pictures of its contents, are removed. Any
+  bash, zsh or fish history entry holding the key or passphrase a run used is
+  removed, including macOS Terminal's history for each window, and what's
+  cut is zeroed.
 - **Offline unless you update.** Only `encryptor update` goes online, and
   only when you run it.
-- **Saved summaries don't name the file.** Every name and path in a summary
-  you save is replaced with `…`.
 - **Runs on a screen of its own,** with its name in large letters, wiped
   when you press Enter at the end, leaving your window as it was.
 - **Warned about disks that keep old copies.** On a copy-on-write
@@ -73,8 +70,9 @@ and `encryptor update` updates it either way; see [Install](#install).
   partial output, and the original stays unless it was already encrypted and
   verified.
 - **Files of any size, in a few megabytes of memory.** Files are encrypted
-  in 64 KiB chunks, each authenticated on its own, with progress shown for
-  large ones.
+  in 64 KiB chunks, each authenticated on its own, with a progress bar for
+  large ones, and one bar for the whole run when encrypting or decrypting
+  several files or a folder.
 - **Metadata comes back too.** Permissions, times, owner and extended
   attributes (ACLs, Finder tags, download quarantine) are stored inside the
   encryption and restored. Any file type works: the tool only sees bytes.
@@ -105,13 +103,26 @@ To read the script before running it, download it and run `sh install.sh`.
 
 It downloads the binary for your system from the latest
 [GitHub release](https://github.com/neddyP/encryptor/releases), over HTTPS
-only with curl, and installs it as `/usr/local/bin/encryptor`, with `encrypt`
-and `decrypt` linked to it. If you can't write to `/usr/local/bin` yourself,
+only with curl or GNU wget, checks it against the release's `SHA256SUMS`, and
+refuses it if it doesn't match. Then it installs it as
+`/usr/local/bin/encryptor`, with `encrypt` and `decrypt` linked to it. If you can't write to `/usr/local/bin` yourself,
 as usual unless you're root, it uses sudo for that, which asks for your
 password. On a system without sudo, it installs into `~/.local/bin` instead,
 for you alone, and tells you how to add that folder to your `PATH` if it isn't
 there yet. The binary is statically linked, so it runs on any distribution
 and needs nothing else installed.
+
+The checksum catches a damaged or altered download, but it comes from the
+same release as the binary. To check the binary was built by this
+repository's release workflow from its source, with the
+[GitHub CLI](https://cli.github.com):
+
+```
+gh attestation verify /usr/local/bin/encryptor --repo neddyP/encryptor
+```
+
+The npm package carries the same kind of record, shown as provenance on its
+npm page.
 
 Check it worked:
 
@@ -146,9 +157,6 @@ worked:
 ```
 encryptor --help
 ```
-
-`aes256`, the old name for `encryptor`, still works until 3.0, with a note
-saying so.
 
 **Permission denied (`EACCES`)?** On Linux with Node from your distribution's
 packages, global installs go into `/usr/local`, which needs root. Either
@@ -218,8 +226,7 @@ export PATH="$HOME/encryptor/bin:$PATH"
 
 Reload with `source ~/.bashrc` and check with `type encrypt`.
 
-`bin/encrypt`, `bin/decrypt` and `bin/encryptor` (and `bin/aes256`, its old
-name) are symlinks to `target/release/encryptor`, so rebuilding updates them
+`bin/encrypt`, `bin/decrypt` and `bin/encryptor` are symlinks to `target/release/encryptor`, so rebuilding updates them
 automatically. After a
 `cargo clean`, run `cargo build --release` again to bring them back.
 
@@ -231,8 +238,11 @@ you also installed it another way, whichever `encrypt` comes first on your
 ## Usage
 
 ```
-encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
-decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
+encrypt FILE... [OPTIONS]      encrypt each FILE to FILE.enc, then delete it
+encrypt -r FOLDER [OPTIONS]    encrypt every file in FOLDER and its subfolders
+decrypt FILE.enc... [OPTIONS]  decrypt each FILE.enc back to FILE
+decrypt -r FOLDER [OPTIONS]    decrypt every .enc file in FOLDER and its
+                               subfolders, all with one key
 encryptor view FILE.enc        show FILE.enc decrypted on screen, then
                                erase it and encrypt it again
 encryptor                      show the home screen
@@ -255,6 +265,7 @@ the questions in advance, so it isn't asked:
 
 | Option                | What it does                                                        |
 | --------------------- | ------------------------------------------------------------------- |
+| `-r`, `--recursive`   | Take in every file in the folders given and their subfolders; decrypt takes `.enc` files only |
 | `-k`, `--key-file KEY` | Use the key in `KEY`: 32 bytes, or 64 hex characters. It can be a pipe |
 | `--new-key PATH`      | Encrypt with a new key, saved to `PATH`, or into `PATH` if it's a folder |
 | `--keep`              | Encrypt, but keep the original instead of deleting it               |
@@ -279,7 +290,7 @@ the version and this help. Press `e` to encrypt a file, `d` to decrypt one,
 `v` to view one, or `q` to quit; the arrow keys scroll if it doesn't all
 fit. Without a terminal it asks "Encrypt or decrypt?" instead.
 
-If you leave out `FILE`, you're asked for it. Typed paths may be quoted or
+If you leave out `FILE`, you're asked for it, or with `-r`, for the folder. Typed paths may be quoted or
 start with `~/`, so you can drag a file into the terminal.
 
 Questions, warnings and errors go to standard error, and only the final
@@ -287,22 +298,56 @@ report to standard output, so `encrypt report.pdf > report.txt` still shows
 every question and saves just the report. With its output redirected like
 this, it runs in the window itself rather than on a screen of its own.
 
-`encrypt` takes one file at a time. To encrypt a folder or several files, zip
-them into a single file first. Given a folder or more than one file, `encrypt`
-prints the commands to do this, using your own names:
+### Several files and folders
+
+`encrypt` and `decrypt` take any number of files, and with `-r` every file
+in the folders given and in all their subfolders, hidden files too:
 
 ```
-$ encrypt photos
-error: photos is a folder.
-encrypt can't encrypt folders or multiple files, only one file at a time.
-Zip them into a single file, then encrypt that:
-
-  Zip the folder:    zip -r photos.zip photos
-  Encrypt the zip:   encrypt photos.zip
-
-encrypt deletes the zip once it's encrypted, but not the originals: delete
-them yourself once you've checked the encrypted file.
+encrypt ~/report.pdf ~/list.md ~/data.xlsx
+encrypt -r ~/Documents/taxes
+decrypt -r ~/Documents/taxes
 ```
+
+Each file is encrypted to its own `.enc` file beside it, and its original
+destroyed, exactly as for one file. After `Use a 256-bit key or a custom
+passphrase? [ky/ps]` comes one more question:
+
+```
+Use one universal key for all 3 files, or a separate key for each? [u/s]:
+```
+
+- **`u`, universal:** one key for every file. A saved key is named after the
+  folder: `taxes.key` for `encrypt -r ~/Documents/taxes`, and for files named
+  one by one, the folder they're all in: `you.key` for the example above,
+  with a home folder of `/home/you`. With a passphrase, it's one passphrase for all of them.
+- **`s`, separate:** each file gets its own key, saved as `<file>.key` (a
+  number is added when two files share a name), or its own passphrase. The
+  save and print questions are asked once, for all the keys. Keys you type,
+  and passphrases, are asked for file by file as each is reached.
+
+`--key-file` and `--new-key` give one universal key, so the question isn't
+asked. Every file is checked before any key is made: if one can't be
+encrypted, as when its `.enc` file already exists, nothing is done and the
+problems are listed. Then the files are done in turn, and if one fails, the
+run stops there, saying how many were done; the rest are left as they were.
+
+Going through folders, `encrypt` leaves out files already ending in `.enc`,
+symbolic links (which aren't followed, so nothing outside the folder is
+reached), anything that isn't a regular file, the keys folder, and the key
+file in use, since encrypting a key would lock it inside the files it opens.
+The report says what was left out.
+
+`decrypt` with several files asks the same `[u/s]` question: answer `u` to
+give one key or passphrase for all of them, or `s` to give each file's in
+turn. Files encrypted with a passphrase and files encrypted with a key can't
+share one, so given both, it asks for each in turn. `decrypt -r` only takes
+one universal key or passphrase for every `.enc` file in the folder, and
+refuses a folder holding both kinds.
+
+A passphrase is made into each file's key with that file's own salt, so
+Argon2id runs once per file, about a second each on a recent desktop. For a
+folder of hundreds of files, a universal key is much faster.
 
 ### Encrypting
 
@@ -331,9 +376,9 @@ Encrypt using AES-256-GCM? [y/n]: y
   Metadata       stored encrypted: permissions 644, owner 1000:1000, accessed, modified and created times
   Integrity      verified: re-read from disk, decrypted, SHA-256 matches original
   Original       overwritten with zeros, name scrambled, then deleted
-  Desktop traces removed 1 thumbnail and 1 recently used entry
+  Thumbnails     removed 1
   Key and data   kept in RAM (never swapped), wiped after use
-  Shell history  removed 2 entries that ran this tool, from ~/.bash_history
+  Shell history  no entries held the key
   Time           15.75ms
 ----------------------------------------------------------------
 Save this summary as encryption-summary.txt in the current folder? [y/n]: n
@@ -357,9 +402,12 @@ The prompts go in this order:
    characters, with a capital, a lowercase letter, a number and a special
    character such as `!` or `#`. Anyone with the encrypted file can try
    guesses at it, so use a long one, such as five or more random words. It's
-   made into the key with Argon2id (7 MiB, 40 passes), in locked memory
-   that's wiped afterwards, and the file is written in [format
-   4](#file-format), which records those settings.
+   made into the key with Argon2id (256 MiB, 3 passes, about half a second),
+   in memory that's wiped afterwards, and locked out of swap where the system
+   allows that much (most only let a program lock 8 MiB). The file is written
+   in [format 4](#file-format), which records those settings, so files made
+   with the earlier 7 MiB settings still open. encryptor 2.5.1 and earlier
+   can't open files made with these settings unless run as root.
 2. **Generate a random key?** Answer `n` to enter your own key instead; the
    save and print questions are then skipped.
 3. **Save the key as a file?** `y` saves it as a 32-byte binary file named
@@ -386,8 +434,7 @@ The prompts go in this order:
    it never encrypted anything.
 6. **Save this summary?** `y` saves the report as `encryption-summary.txt`
    in the current directory, readable only by you (a number is added if the
-   name is taken), with every file name and path left out. It's only asked at a
-   terminal, and not with `--yes` or `--quiet`, so scripts never wait for it.
+   name is taken). It's only asked at a terminal, and not with `--yes` or `--quiet`, so scripts never wait for it.
 7. **Press Enter to exit and wipe this screen.** Everything encryptor showed
    is erased and your window comes back as it was before you ran it. If
    something recorded the session, it's named first, since its copy can't be
@@ -452,7 +499,7 @@ Decrypt using AES-256-GCM? [y/n]: y
   Integrity      verified: re-read from disk, SHA-256 matches decrypted data
   Metadata       restored permissions 644, accessed and modified times; not restored: created time (this system can't set it)
   Key and data   kept in RAM (never swapped), wiped after use
-  Shell history  key not found in shell history
+  Shell history  no entries held the key
   Time           10.90ms
 ----------------------------------------------------------------
 ```
@@ -462,7 +509,7 @@ key file. A bare name like `report.pdf.key` is also looked for in the keys
 folder, where new keys are saved. Neither is echoed. You get three attempts.
 A file encrypted with a passphrase asks `Enter the passphrase:` instead, and
 `--key-file` doesn't apply to it. As after encrypting, you're then offered to save the summary, as
-`decryption-summary.txt` with names and paths left out, and Enter exits and
+`decryption-summary.txt`, and Enter exits and
 wipes the screen.
 
 The `.enc` suffix is removed to name the output. Files without it get `.dec`
@@ -603,6 +650,8 @@ encrypt report.pdf --new-key ~/keys/ --yes                 # new key saved as ~/
 encrypt backup.tar --key-file ~/keys/backup.key --keep -y  # encrypt a copy, keep the original
 decrypt report.pdf.enc --key-file ~/keys/report.pdf.key --yes
 decrypt report.pdf.enc --key-file <(pass show keys/report) --yes   # key from a password manager
+encrypt -r photos --new-key ~/keys/photos.key --yes        # every file in photos, one key
+decrypt -r photos --key-file ~/keys/photos.key --yes
 ```
 
 Keys are never given on the command line itself, since every user can see
@@ -747,24 +796,20 @@ starts with the metadata, as above; version 1's is just the contents.
   filesystems (APFS, btrfs, ZFS), snapshots and backups can keep old copies
   of the original, and of history files and thumbnails the tool overwrites.
   Full-disk encryption is the reliable protection for those.
-- **Some traces are out of the tool's reach.** It removes what it can find,
-  but a run can still be told from:
-  - **The command that ran it, in the shell you ran it from.** Shells keep
-    their own session's history in memory and save it when they exit, after
-    the tool has finished, so it's only removed by a later run. To keep it
-    out, start the command with a space: bash does that with
-    `HISTCONTROL=ignorespace` (or `ignoreboth`, Ubuntu's default), zsh with
-    `setopt HIST_IGNORE_SPACE`, and fish always. Other shells left open can
-    also write back entries they read when they started.
-  - **Timestamps.** The `.enc` and `.key` files show when they were
-    written. Their folders' modified times are set back, which updates the
-    folders' change times instead. The tool's own files have their last-read times set
-    back to when they were installed, but setting them updates their change
-    times (`ctime`, shown by `stat`), which no program can set, so those show
-    the last run instead. Only files actually read are set back, so on disks
-    that don't record reads (mounted with `noatime`) nothing changes. A
-    Node.js the tool can't change, such as one owned by root, keeps its
-    last-read time.
+- **It doesn't hide that it ran.** Shell history keeps the commands that
+  ran it, file and folder timestamps show when it ran, your desktop's list of
+  recently used files keeps the original's name, and a saved summary names
+  the files. Only the key, passphrase and the original's contents are
+  removed. To keep a command out of history, start it with a space: bash does
+  that with `HISTCONTROL=ignorespace` (or `ignoreboth`, Ubuntu's default),
+  zsh with `setopt HIST_IGNORE_SPACE`, and fish always.
+- **Some copies are out of the tool's reach.** It removes what it can find,
+  but copies can still be kept in:
+  - **A key typed into the command that ran it.** Shells keep their own
+    session's history in memory and save it when they exit, after the tool
+    has finished, so it's only removed by a later run that uses that key.
+    Other shells left open can also write back entries they read when they
+    started.
   - **Copies other programs made.** Editor backups, downloads, email
     attachments, cloud sync and backups, desktop search indexes (GNOME's
     LocalSearch, KDE's Baloo), other programs' own lists of recent files,
@@ -821,7 +866,7 @@ Argon2id against another implementation, passphrase files end to end, the
 keys folder,
 overwriting and deleting files (including when a file is swapped for a
 symlink part way through, is read-only, or has other names), removing shell
-history entries, thumbnails and recently used entries, escaping of untrusted file
+history entries holding a key, thumbnails, escaping of untrusted file
 names, laying out a viewed file and showing its control characters instead of
 obeying them, recognising recorders and the files they write to, storing and restoring
 metadata (including reading files from earlier versions), telling how a copy
@@ -837,19 +882,20 @@ The code is in `src/`:
 | `cli.rs`       | The command line and its options                                     |
 | `encrypt.rs`   | The encrypt command and its report                                   |
 | `decrypt.rs`   | The decrypt command and its report                                   |
+| `batch.rs`     | Several files and folders (`-r`), with universal or separate keys    |
 | `view.rs`      | The view command, then keeping the key or encrypting it again        |
 | `pager.rs`     | Showing a decrypted file on a screen of its own, then erasing it     |
 | `keys.rs`      | Generating, saving, printing and entering keys, and passphrases      |
-| `history.rs`   | Removing keys and runs of the tool from shell history                |
-| `timestamps.rs` | Setting its own files' last-read times back to install time     |
-| `desktop.rs`   | Removing the original's thumbnails and recently used entries         |
+| `history.rs`   | Removing keys and passphrases from shell history                     |
+| `desktop.rs`   | Removing the original's thumbnails                                   |
 | `stream.rs`    | Chunked encryption, format versions 3 and 4                          |
-| `kdf.rs`       | Keys from passphrases, with Argon2id in locked memory                |
+| `kdf.rs`       | Keys from passphrases, with Argon2id                                 |
 | `legacy.rs`    | Decrypting format versions 1 and 2                                   |
 | `meta.rs`      | The stored metadata                                                  |
 | `files.rs`     | Checking input, reading back from disk, writing output safely        |
 | `wipe.rs`      | Secure deletion, and rewriting files in place                        |
-| `term.rs`      | Terminal input and output, prompts, progress                         |
+| `term.rs`      | Terminal input and output, prompts                                   |
+| `progress.rs`  | Progress bars, for large files and for a whole batch                 |
 | `recording.rs` | Finding anything recording the session                               |
 | `explain.rs`   | Error messages and their fixes                                       |
 | `error.rs`     | The error type                                                       |

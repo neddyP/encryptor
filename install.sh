@@ -7,7 +7,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/neddyP/encryptor/master/install.sh | sh
 #
-# or download this file and run `sh install.sh`. To update, run
+# or download this file and run `sh install.sh`. The binary is checked
+# against the release's SHA256SUMS before it's installed. To update, run
 # `encryptor update`, which runs this script again with ENCRYPTOR_DIR set to
 # the folder its copy is in. To uninstall:
 #   cd /usr/local/bin && sudo rm encryptor encrypt decrypt
@@ -33,7 +34,9 @@
     *) die "there's no build for $(uname -m)" ;;
   esac
 
-  url=https://github.com/neddyP/encryptor/releases/latest/download/encryptor-$os-$arch
+  release=https://github.com/neddyP/encryptor/releases/latest/download
+  name=encryptor-$os-$arch
+  url=$release/$name
   dir=${ENCRYPTOR_DIR:-/usr/local/bin}
   sudo=
   if ! { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; }; then
@@ -46,16 +49,39 @@
     fi
   fi
 
+  # Over HTTPS only: curl and GNU wget refuse to follow a redirect to plain
+  # HTTP. BusyBox's wget can't be told to, but the checksum still is checked.
+  download() {
+    if command -v curl >/dev/null; then
+      curl -fsSL --proto '=https' "$1"
+    elif ! command -v wget >/dev/null; then
+      die "it needs curl or wget to download it"
+    elif wget --help 2>&1 | grep -q -- --https-only; then
+      wget --https-only -qO- "$1"
+    else
+      wget -qO- "$1"
+    fi
+  }
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' EXIT
+  sums=$(mktemp)
+  trap 'rm -f "$tmp" "$sums"' EXIT
   trap 'exit 130' HUP INT TERM
-  if command -v curl >/dev/null; then
-    curl -fsSL --proto '=https' "$url" >"$tmp"
-  elif command -v wget >/dev/null; then
-    wget -qO- "$url" >"$tmp"
+  download "$url" >"$tmp" || die "couldn't download $url"
+  download "$release/SHA256SUMS" >"$sums" || die "couldn't download the release's checksums, $release/SHA256SUMS"
+
+  # The binary must match the checksum the release lists for it, so a
+  # damaged or altered download is never installed.
+  expected=$(awk -v name="$name" '$2 == name || $2 == "*" name { print $1 }' "$sums")
+  [ -n "$expected" ] || die "the release's checksums don't list $name"
+  if command -v sha256sum >/dev/null; then
+    actual=$(sha256sum "$tmp" | cut -d ' ' -f 1)
+  elif command -v shasum >/dev/null; then
+    actual=$(shasum -a 256 "$tmp" | cut -d ' ' -f 1)
   else
-    die "it needs curl or wget to download it"
-  fi || die "couldn't download $url"
+    die "it needs sha256sum or shasum to check the download"
+  fi
+  [ "$actual" = "$expected" ] ||
+    die "the download doesn't match the release's checksum, so it's damaged or was altered. Try again later"
 
   # Copied in under another name and renamed over the old one, so neither a
   # running encryptor nor macOS's check of its signature sees a partial file.

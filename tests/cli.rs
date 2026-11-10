@@ -115,22 +115,6 @@ fn runnable() -> bool {
     how_to_run().is_some()
 }
 
-/// Whether the binary may lock the memory a passphrase is made into a key in,
-/// as it raises its limit as far as the system allows. Some build containers
-/// allow only 64 KiB, and the binary refuses passphrases there.
-fn can_lock_a_passphrase() -> bool {
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-    // SAFETY: reads this process's limit into a valid local.
-    let known = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } == 0;
-    // SAFETY: geteuid has no arguments and can't fail.
-    let root = unsafe { libc::geteuid() } == 0;
-    let enough = root || !known || limit.rlim_max == libc::RLIM_INFINITY || limit.rlim_max as u64 >= 8 << 20;
-    if !enough {
-        eprintln!("skipping: this system lets a program lock too little memory for a passphrase (ulimit -l)");
-    }
-    enough
-}
-
 struct Run(Output);
 
 impl Run {
@@ -282,7 +266,7 @@ fn exits_with_a_status_scripts_can_act_on() {
     assert_eq!(status(&["decrypt", "plain.txt", "-k", "a.key", "-y"]), 4, "not encrypted");
     assert_eq!(status(&["decrypt", "a.txt.enc", "--force"]), 2, "unknown option");
     assert_eq!(status(&["encrypt", "plain.txt", "--key-file", "a.key", "--new-key", "b.key"]), 2, "conflict");
-    assert_eq!(status(&["encrypt", "plain.txt", "a.txt.enc"]), 2, "two files");
+    assert_eq!(status(&["decrypt", "a.txt.enc", "b.txt.enc", "-o", "x"]), 2, "--output with two files");
     assert_eq!(status(&["decrypt", "a.txt.enc", "--keep"]), 2, "encrypt-only option");
 }
 
@@ -320,10 +304,6 @@ fn answers_to_its_names() {
     assert!(help.stdout().starts_with("encryptor - encrypt and decrypt files"), "{}", help.stdout());
     assert!(dir.run(&["-V"], "").stdout().starts_with("encryptor "));
 
-    let old = dir.run_as(&link("aes256"), &["--version"], "");
-    assert_eq!(old.code(), 0);
-    assert!(old.stderr().contains("aes256 command is now called encryptor"), "{}", old.stderr());
-
     dir.write("x.txt", b"x");
     let run = dir.run_as(&link("encrypt"), &["x.txt", "--new-key", "x.key", "-y", "-q"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
@@ -347,7 +327,7 @@ fn updates_only_a_copy_it_knows_how_to_replace() {
 }
 
 #[test]
-fn removes_the_key_and_runs_of_the_tool_from_shell_history() {
+fn removes_the_key_from_shell_history_and_leaves_the_rest() {
     if !runnable() {
         return;
     }
@@ -355,31 +335,24 @@ fn removes_the_key_and_runs_of_the_tool_from_shell_history() {
     dir.write("a.txt", b"a");
     dir.write("a.key", &[0x5a; 32]);
     let hex = "5A".repeat(32);
-    dir.write(
-        ".bash_history",
-        format!("ls\nencrypt old.txt\necho {hex}\n./target/release/encryptor --help\ncd /\n").as_bytes(),
-    );
-    dir.write(".zsh_history", b": 1700000000:0;decrypt b.enc\n: 1700000001:0;pwd\n");
+    dir.write(".bash_history", format!("ls\nencrypt old.txt\necho {hex}\ncd /\n").as_bytes());
+    dir.write(".zsh_history", b": 1700000000:0;decrypt b.enc\n");
 
     let run = dir.run(&["encrypt", "a.txt", "--key-file", "a.key", "-y"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
-    assert!(
-        run.stdout().contains("removed 1 entry holding the key and 3 that ran this tool, from ~/.bash_history, ~/.zsh_history"),
-        "{}",
-        run.stdout()
-    );
-    assert_eq!(dir.read(".bash_history"), b"ls\ncd /\n");
-    assert_eq!(dir.read(".zsh_history"), b": 1700000001:0;pwd\n");
+    assert!(run.stdout().contains("removed 1 entry holding the key, from ~/.bash_history"), "{}", run.stdout());
+    // Only the entry with the key goes; runs of the tool stay.
+    assert_eq!(dir.read(".bash_history"), b"ls\nencrypt old.txt\ncd /\n");
+    assert_eq!(dir.read(".zsh_history"), b": 1700000000:0;decrypt b.enc\n");
 
-    // So is a run that stops before a key is asked for.
-    dir.write(".bash_history", b"ls\nencrypt missing.txt\n");
+    // A run that stops before a key is asked for leaves history alone.
     assert_eq!(dir.run(&["encrypt", "missing.txt"], "").code(), 4);
-    assert_eq!(dir.read(".bash_history"), b"ls\n");
+    assert_eq!(dir.read(".bash_history"), b"ls\nencrypt old.txt\ncd /\n");
 }
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn removes_the_thumbnails_and_recent_entry_of_the_original() {
+fn removes_the_thumbnails_of_the_original_only() {
     use md5::{Digest, Md5};
     if !runnable() {
         return;
@@ -396,9 +369,10 @@ fn removes_the_thumbnails_and_recent_entry_of_the_original() {
 
     let run = dir.run(&["encrypt", "photo.jpg", "--new-key", "photo.key", "-y"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
-    assert!(run.stdout().contains("removed 1 thumbnail and 1 recently used entry"), "{}", run.stdout());
+    assert!(run.stdout().contains("Thumbnails     removed 1"), "{}", run.stdout());
     assert!(!dir.exists(&thumbnail));
-    assert_eq!(dir.read(".local/share/recently-used.xbel"), b"<xbel>\n</xbel>\n");
+    // The recently used list is left as it was.
+    assert_eq!(dir.read(".local/share/recently-used.xbel"), recent.as_bytes());
 }
 
 #[test]
@@ -503,7 +477,7 @@ fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
 
 #[test]
 fn encrypts_with_a_passphrase() {
-    if !runnable() || !can_lock_a_passphrase() {
+    if !runnable() {
         return;
     }
     let dir = Scratch::new("passphrase");
@@ -578,4 +552,108 @@ fn refuses_a_weak_passphrase() {
     let run = dir.run(&["encrypt", "a.txt"], "k\nky\ny\ny\nn\ny\n");
     assert!(run.stderr().contains("please answer ky or ps"), "{}", run.stderr());
     assert_eq!(run.code(), 0, "{}", run.stderr());
+}
+
+#[test]
+fn encrypts_and_decrypts_several_files_with_one_key() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("several");
+    for (name, contents) in [("report.pdf", "r"), ("list.md", "l"), ("data.xlsx", "d")] {
+        dir.write(name, contents.as_bytes());
+    }
+    let run = dir.run(&["encrypt", "report.pdf", "list.md", "data.xlsx", "--new-key", "all.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("one universal key for all 3 files"), "{}", run.stdout());
+    assert!(run.stdout().contains("Originals      all 3: overwritten with zeros"), "{}", run.stdout());
+    for name in ["report.pdf", "list.md", "data.xlsx"] {
+        assert!(!dir.exists(name) && dir.exists(&format!("{name}.enc")), "{name}");
+    }
+
+    let run = dir.run(&["decrypt", "report.pdf.enc", "list.md.enc", "data.xlsx.enc", "-k", "all.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("3 decrypted"), "{}", run.stdout());
+    assert_eq!((dir.read("report.pdf"), dir.read("list.md"), dir.read("data.xlsx")), (b"r".into(), b"l".into(), b"d".into()));
+
+    // --output names one file.
+    assert_eq!(dir.run(&["decrypt", "report.pdf.enc", "list.md.enc", "-o", "x"], "").code(), 2);
+}
+
+#[test]
+fn encrypts_a_folder_with_a_universal_key_named_after_it() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("recursive");
+    fs::create_dir_all(dir.path("docs/sub")).unwrap();
+    dir.write("docs/a.txt", b"one");
+    dir.write("docs/sub/b.txt", b"two");
+    dir.write("docs/.hidden", b"three");
+
+    // Without -r, a folder is refused.
+    let run = dir.run(&["encrypt", "docs"], "");
+    assert_eq!(run.code(), 4);
+    assert!(run.stderr().contains("encrypt -r docs"), "{}", run.stderr());
+
+    // Key, universal, generate, save, don't print, encrypt.
+    let run = dir.run(&["encrypt", "-r", "docs"], "ky\nu\ny\ny\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("[u/s]"), "{}", run.stderr());
+    let key = ".local/share/encryptor/keys/docs.key";
+    assert!(dir.exists(key));
+    for name in ["docs/a.txt", "docs/sub/b.txt", "docs/.hidden"] {
+        assert!(!dir.exists(name) && dir.exists(&format!("{name}.enc")), "{name}");
+    }
+
+    let run = dir.run(&["decrypt", "-r", "docs", "-k", key, "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(dir.read("docs/sub/b.txt"), b"two");
+    assert_eq!(dir.read("docs/.hidden"), b"three");
+    // decrypt -r doesn't ask [u/s]: it's one key for all.
+    assert!(!run.stderr().contains("[u/s]"), "{}", run.stderr());
+}
+
+#[test]
+fn gives_each_file_a_key_of_its_own() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("separate");
+    dir.write("a.txt", b"a");
+    dir.write("b.txt", b"b");
+    // Key, separate, generate each, save each, don't print, encrypt.
+    let run = dir.run(&["encrypt", "a.txt", "b.txt"], "ky\ns\ny\ny\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    let keys = ".local/share/encryptor/keys";
+    assert!(dir.exists(&format!("{keys}/a.txt.key")) && dir.exists(&format!("{keys}/b.txt.key")));
+    assert!(run.stdout().contains("a separate one for each file"), "{}", run.stdout());
+
+    // One key can't open both.
+    let run = dir.run(&["decrypt", "a.txt.enc", "b.txt.enc", "-k", &format!("{keys}/a.txt.key"), "-y"], "");
+    assert_eq!(run.code(), 3, "{}", run.stderr());
+    assert!(run.stderr().contains("Stopped at b.txt.enc: 1 of the 2 files were decrypted"), "{}", run.stderr());
+    assert_eq!(dir.read("a.txt"), b"a");
+    fs::remove_file(dir.path("a.txt")).unwrap();
+
+    // Separate, then each file's key in turn.
+    let answers = format!("s\ny\n{keys}/a.txt.key\n{keys}/b.txt.key\n");
+    let run = dir.run(&["decrypt", "a.txt.enc", "b.txt.enc"], &answers);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!((dir.read("a.txt"), dir.read("b.txt")), (b"a".into(), b"b".into()));
+}
+
+#[test]
+fn checks_every_file_before_making_a_key() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("batch-check");
+    dir.write("a.txt", b"a");
+    dir.write("b.txt", b"b");
+    dir.write("b.txt.enc", b"in the way");
+    let run = dir.run(&["encrypt", "a.txt", "b.txt", "--new-key", "k.key", "-y"], "");
+    assert_eq!(run.code(), 4, "{}", run.stderr());
+    assert!(run.stderr().contains("1 of the 2 files can't be encrypted, so nothing was done"), "{}", run.stderr());
+    assert!(dir.exists("a.txt") && !dir.exists("a.txt.enc") && !dir.exists("k.key"));
 }

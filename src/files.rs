@@ -29,9 +29,8 @@ pub fn input_len(command: &str, path: &Path) -> Result<u64> {
     }
     if kind.is_dir() {
         return Err(Error::File(match command {
-            "encrypt" => explain::zip_instead(&[path.to_string_lossy().into_owned()]),
             "view" => format!("{} is a folder; view shows one encrypted file at a time.", safe_path(path)),
-            _ => explain::decrypt_folder(path),
+            _ => explain::folder_needs_r(command, path),
         }));
     }
     if !kind.is_file() {
@@ -138,6 +137,7 @@ pub struct PartFile {
 }
 
 /// What became of a file that `PartFile` replaced.
+#[derive(Clone, Copy)]
 pub enum Replaced {
     Nothing,
     /// Overwritten with zeros, then deleted.
@@ -216,7 +216,7 @@ impl Drop for PartFile {
         // A partial file can be large and take a while to overwrite, so say
         // what's happening rather than seem to hang after Ctrl-C.
         let size = self.file.metadata().map_or(0, |meta| meta.len());
-        let mut progress = term::Progress::new("Shredding", size);
+        let mut progress = crate::progress::Progress::new("Shredding", size);
         if progress.shown() {
             eprintln!(
                 "\nOverwriting the unfinished {} with zeros before deleting it, as it may hold plaintext.",
@@ -510,6 +510,8 @@ mod tests {
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
         // SAFETY: fills in a statfs for an open descriptor.
         unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) };
+        // Their types differ by platform, so they're cast to a common one.
+        #[allow(clippy::unnecessary_cast)]
         let tmpfs = stat.f_type as i64 == libc::TMPFS_MAGIC as i64;
 
         let before = resident(&file);

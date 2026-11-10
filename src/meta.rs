@@ -199,23 +199,23 @@ impl Metadata {
         // capabilities. Those are privileges, so they are restored only along
         // with the original owner, as `cp -p` does.
         let mut same_owner = true;
-        if let (Some((uid, gid)), Ok(now)) = (self.owner, file.metadata()) {
-            if (uid, gid) != (now.uid(), now.gid()) {
-                if std::os::unix::fs::fchown(file, Some(uid), Some(gid)).is_ok() {
-                    restored.push(format!("owner {uid}:{gid}"));
-                } else {
-                    if uid != now.uid() {
-                        same_owner = false;
-                        missed.push(format!("owner {uid} (only root can give a file away)"));
-                    }
-                    if gid != now.gid() {
-                        match std::os::unix::fs::fchown(file, None, Some(gid)) {
-                            Ok(()) => restored.push(format!("group {gid}")),
-                            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                                missed.push(format!("group {gid} (you aren't a member of it)"));
-                            }
-                            Err(e) => missed.push(format!("group {gid} ({e})")),
+        if let (Some((uid, gid)), Ok(now)) = (self.owner, file.metadata())
+            && (uid, gid) != (now.uid(), now.gid())
+        {
+            if std::os::unix::fs::fchown(file, Some(uid), Some(gid)).is_ok() {
+                restored.push(format!("owner {uid}:{gid}"));
+            } else {
+                if uid != now.uid() {
+                    same_owner = false;
+                    missed.push(format!("owner {uid} (only root can give a file away)"));
+                }
+                if gid != now.gid() {
+                    match std::os::unix::fs::fchown(file, None, Some(gid)) {
+                        Ok(()) => restored.push(format!("group {gid}")),
+                        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                            missed.push(format!("group {gid} (you aren't a member of it)"));
                         }
+                        Err(e) => missed.push(format!("group {gid} ({e})")),
                     }
                 }
             }

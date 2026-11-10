@@ -79,7 +79,7 @@ impl Original {
     /// Describes what happened, for the report: `Ok` once it's deleted.
     pub fn destroy(mut self, path: &Path) -> std::result::Result<String, String> {
         let size = self.file.metadata().map_or(0, |meta| meta.len());
-        let mut progress = crate::term::Progress::new("Shredding the original", size);
+        let mut progress = crate::progress::Progress::new("Shredding the original", size);
         let zeroed = zero_fill(&mut self.file, &mut |done| progress.update(done));
         drop(progress);
         match remove_if_same(path, self.dev, self.ino) {

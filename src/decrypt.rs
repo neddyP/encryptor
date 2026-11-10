@@ -16,8 +16,8 @@ use crate::files::{self, PartFile, Replaced};
 use crate::keys::{self, SecretKey};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
-use crate::term::{self, confirm, safe, safe_path};
-use crate::{KEY_LEN, MAGIC, VERSION, history, kdf, legacy, protect, stream, timestamps, wipe};
+use crate::term::{confirm, safe, safe_path};
+use crate::{KEY_LEN, MAGIC, VERSION, history, kdf, legacy, protect, stream, wipe};
 
 /// An encrypted file, open and checked, with its start already read.
 pub struct Encrypted {
@@ -80,7 +80,7 @@ pub fn key(options: &Options, run_again: &str, plain: &Path, encrypted: &Encrypt
         let give_up =
             format!("no passphrase entered.\nRun {run_again} again, and enter the passphrase it was encrypted with.");
         let passphrase = keys::enter_passphrase(&give_up)?;
-        let history = history::clean(Some(history::Secret::Passphrase(passphrase.as_bytes())));
+        let history = history::clean(history::Secret::Passphrase(passphrase.as_bytes()));
         let key = kdf::key_for(passphrase.as_bytes(), &encrypted.start)?;
         return Ok(Unlocked { key, key_file: None, passphrase: true, history });
     }
@@ -96,7 +96,7 @@ pub fn key(options: &Options, run_again: &str, plain: &Path, encrypted: &Encrypt
             keys::prompt(false, &give_up)?
         }
     };
-    let history = history::clean(Some(history::Secret::Key(&key)));
+    let history = history::clean(history::Secret::Key(&key));
     Ok(Unlocked { key, key_file, passphrase: false, history })
 }
 
@@ -173,28 +173,22 @@ pub fn replaced_note(replaced: Replaced) -> &'static str {
 }
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
-    let input = files::file_path("decrypt", file)?;
-    let encrypted = open("decrypt", &input)?;
-    let read_error = |e| Error::File(explain::file(Action::Read, &input, &e));
+    command_path(files::file_path("decrypt", file)?, options)
+}
 
+/// The decrypt command for one file, `input`.
+pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
+    let encrypted = open("decrypt", &input)?;
     let output = options.output.clone().unwrap_or_else(|| files::decrypted_path(&input));
-    if files::same_file(&input, &output) {
-        return Err(Error::Usage(format!(
-            "{} is the encrypted file itself; choose another name with --output",
-            safe_path(&output)
-        )));
-    }
-    files::check_writable(&output)?;
+    let replace = check_output(&input, &output)?;
     // Replacing a file is never agreed to through a pipe: a script says so
     // with --overwrite, and otherwise finds out before giving a key.
-    let replace = output.exists();
     let interactive = io::stdin().is_terminal();
     if replace && !options.overwrite && !interactive {
         return Err(Error::Usage(explain::needs_overwrite(&output)));
     }
 
     let unlocked = key(options, "decrypt", &output, &encrypted)?;
-    let Encrypted { mut source, start, version, len: input_len } = encrypted;
 
     if !options.yes && !confirm("Decrypt using AES-256-GCM?")? {
         eprintln!("Cancelled; nothing was decrypted.");
@@ -205,40 +199,17 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         return Ok(());
     }
 
-    // The folders this writes in (for the decrypted file and a saved summary)
-    // have their modified times set back when this returns.
-    let _dir_times =
-        timestamps::DirTimes::capture([files::parent_dir(&output), std::env::current_dir().unwrap_or_default()]);
-
     let started = Instant::now();
-    let mut out = PartFile::create(&output, replace)?;
-    let (metadata, plain_len, plain_hash) = if version >= stream::VERSION {
-        let body_len = source.metadata().map_err(read_error)?.len().saturating_sub(start.len() as u64);
-        let mut progress = term::Progress::new("Decrypting", body_len);
-        let opened =
-            stream::decrypt(&unlocked.key, &start, &mut source, body_len, &mut out, &mut |done| progress.update(done))
-                .map_err(|e| failure(e, &input, &output, &unlocked))?;
-        (Some(opened.metadata), opened.len, opened.hash)
-    } else {
-        // Versions 1 and 2 were encrypted whole, so they are decrypted whole.
-        let (metadata, plain) = whole(&unlocked.key, &input, unlocked.key_file.as_deref())?;
-        out.write_all(&plain).map_err(|e| Error::File(explain::file(Action::Write, &output, &e)))?;
-        (metadata, plain.len() as u64, files::sha256(&plain))
-    };
+    let (start, input_len) = (encrypted.start.clone(), encrypted.len);
+    let opened = unseal(&input, &output, encrypted, &unlocked, replace)?;
     let Unlocked { key, passphrase, history, .. } = unlocked;
     drop(key);
-    let replaced = out.finish()?;
-    let metadata_status = settle(&output, &plain_hash, metadata)?;
     let elapsed = started.elapsed();
     if options.quiet {
         return Ok(());
     }
 
-    let replaced = replaced_note(replaced);
-    let mut secrets = vec![safe_path(&input), safe_path(&output)];
-    if let Some(path) = &options.key_file {
-        secrets.push(safe_path(path));
-    }
+    let replaced = replaced_note(opened.replaced);
     report::show(
         "DECRYPTION SUCCESSFUL",
         &[
@@ -246,17 +217,63 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
             ("Key", key_row(&start, passphrase)),
             ("Auth tag", "128-bit, valid: file is authentic and uncorrupted".into()),
             ("Input", format!("{}  {} (kept)", safe_path(&input), fmt_size(input_len))),
-            ("Output", format!("{}  {}{replaced}", safe_path(&output), fmt_size(plain_len))),
+            ("Output", format!("{}  {}{replaced}", safe_path(&output), fmt_size(opened.len))),
             ("Integrity", "verified: re-read from disk, SHA-256 matches decrypted data".into()),
-            ("Metadata", metadata_status),
+            ("Metadata", opened.metadata),
             ("Key and data", protect::memory_status().into()),
             ("Shell history", history),
             ("Time", format!("{elapsed:.2?}")),
         ],
         "decryption-summary",
         interactive && !options.yes,
-        &secrets,
     )
+}
+
+/// Checks that `input` can be decrypted to `output`, and says whether that
+/// would replace a file already there.
+pub fn check_output(input: &Path, output: &Path) -> Result<bool> {
+    if files::same_file(input, output) {
+        return Err(Error::Usage(format!(
+            "{} is the encrypted file itself; choose another name with --output",
+            safe_path(output)
+        )));
+    }
+    files::check_writable(output)?;
+    Ok(output.exists())
+}
+
+/// What decrypting one file did, for the report.
+pub struct Opened {
+    /// The decrypted contents' length.
+    pub len: u64,
+    /// What became of the stored metadata.
+    pub metadata: String,
+    pub replaced: Replaced,
+}
+
+/// Decrypts `encrypted`, opened from `input`, to `output` with `unlocked`,
+/// replacing a file there if `replace`, then checks it reads back from the
+/// disk and restores its metadata.
+pub fn unseal(input: &Path, output: &Path, encrypted: Encrypted, unlocked: &Unlocked, replace: bool) -> Result<Opened> {
+    let read_error = |e| Error::File(explain::file(Action::Read, input, &e));
+    let Encrypted { mut source, start, version, .. } = encrypted;
+    let mut out = PartFile::create(output, replace)?;
+    let (metadata, plain_len, plain_hash) = if version >= stream::VERSION {
+        let body_len = source.metadata().map_err(read_error)?.len().saturating_sub(start.len() as u64);
+        let mut progress = crate::progress::Progress::new("Decrypting", body_len);
+        let opened =
+            stream::decrypt(&unlocked.key, &start, &mut source, body_len, &mut out, &mut |done| progress.update(done))
+                .map_err(|e| failure(e, input, output, unlocked))?;
+        (Some(opened.metadata), opened.len, opened.hash)
+    } else {
+        // Versions 1 and 2 were encrypted whole, so they are decrypted whole.
+        let (metadata, plain) = whole(&unlocked.key, input, unlocked.key_file.as_deref())?;
+        out.write_all(&plain).map_err(|e| Error::File(explain::file(Action::Write, output, &e)))?;
+        (metadata, plain.len() as u64, files::sha256(&plain))
+    };
+    let replaced = out.finish()?;
+    let metadata = settle(output, &plain_hash, metadata)?;
+    Ok(Opened { len: plain_len, metadata, replaced })
 }
 
 /// The format version after the magic bytes, which `open` has checked, if

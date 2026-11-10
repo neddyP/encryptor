@@ -6,6 +6,7 @@
 //! original file's metadata (see `meta`).
 
 mod art;
+mod batch;
 mod cli;
 mod decrypt;
 mod desktop;
@@ -20,6 +21,7 @@ mod keys;
 mod legacy;
 mod meta;
 mod pager;
+mod progress;
 mod protect;
 mod recording;
 mod report;
@@ -28,7 +30,6 @@ mod stream;
 mod term;
 #[cfg(test)]
 mod testing;
-mod timestamps;
 mod update;
 mod view;
 mod wipe;
@@ -53,8 +54,11 @@ const USAGE: &str = "\
 encryptor - encrypt and decrypt files with AES-256-GCM
 
 USAGE:
-    encrypt FILE [OPTIONS]         encrypt FILE to FILE.enc, then delete FILE
-    decrypt FILE.enc [OPTIONS]     decrypt FILE.enc back to FILE
+    encrypt FILE... [OPTIONS]      encrypt each FILE to FILE.enc, then delete it
+    encrypt -r FOLDER [OPTIONS]    encrypt every file in FOLDER and its subfolders
+    decrypt FILE.enc... [OPTIONS]  decrypt each FILE.enc back to FILE
+    decrypt -r FOLDER [OPTIONS]    decrypt every .enc file in FOLDER and its
+                                   subfolders, all with one key
     encryptor view FILE.enc        show FILE.enc decrypted on screen, erase
                                    it, then keep its key or change it
     encryptor                      show the home screen
@@ -62,9 +66,13 @@ USAGE:
 
 `encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as encrypt
 and decrypt, and `encryptor -v FILE.enc` as view. Anything not given is
-asked for.
+asked for. With several files, you're asked whether to use one universal key
+for them all, saved as FOLDER.key after their folder, or a separate key for
+each. --key-file and --new-key give one key for them all.
 
 OPTIONS:
+    -r, --recursive       take in every file in the folders given, and in
+                          their subfolders; decrypt takes .enc files only
     -k, --key-file KEY    use the key in KEY: 32 bytes, or 64 hex characters.
                           KEY can be a pipe, as in <(pass show keys/report)
         --new-key PATH    encrypt with a new key, saved to PATH, or into PATH
@@ -85,9 +93,6 @@ EXIT STATUS:
     0 success, 2 bad options, 3 wrong key or damaged file,
     4 file problem (missing, no permission, disk full), 1 anything else,
     130 interrupted
-
-To encrypt a folder or several files, zip them into one file first:
-    zip -r photos.zip photos
 ";
 
 fn main() -> ExitCode {
@@ -107,17 +112,11 @@ fn main() -> ExitCode {
 
     // Started as `encrypt` or `decrypt`, the name is the command.
     let name = Path::new(&program).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    match name {
-        "encrypt" | "decrypt" => args.insert(0, name.to_owned()),
-        "aes256" => eprintln!("note: the aes256 command is now called encryptor; aes256 will be removed in 3.0."),
-        _ => {}
+    if matches!(name, "encrypt" | "decrypt") {
+        args.insert(0, name.to_owned());
     }
 
     let result = run(&args);
-    // Whatever happened, including a typo or --help, the command that ran
-    // this shouldn't stay in shell history. Most runs have already done this,
-    // and say so in the report.
-    let _ = history::clean(None);
     protect::scrub_stack();
     let code = match &result {
         Ok(()) => ExitCode::SUCCESS,
@@ -132,9 +131,6 @@ fn main() -> ExitCode {
             Ok(()) => {}
         },
     }
-    // Last, once nothing more will be read: the program's files shouldn't
-    // show when it ran.
-    timestamps::reset();
     code
 }
 
@@ -165,13 +161,19 @@ fn run(args: &[String]) -> Result<()> {
         },
         command => command,
     };
-    cli::check(command, &invocation.options)?;
-    let file = invocation.file.as_deref();
+    let options = &invocation.options;
+    cli::check(command, options)?;
+    let files = &invocation.files;
+    let file = files.first().map(String::as_str);
+    // Several files, or folders with -r, are a batch.
+    let batch = files.len() > 1 || options.recursive;
     match command {
-        Command::Encrypt => encrypt::command(file, &invocation.options),
-        Command::View => view::command(file, &invocation.options),
+        Command::Encrypt if batch => batch::encrypt(files, options),
+        Command::Encrypt => encrypt::command(file, options),
+        Command::View => view::command(file, options),
         Command::Update => update::command(),
-        _ => decrypt::command(file, &invocation.options),
+        _ if batch => batch::decrypt(files, options),
+        _ => decrypt::command(file, options),
     }
 }
 

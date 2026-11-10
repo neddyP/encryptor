@@ -1,7 +1,7 @@
 "use strict";
 
 // Runs the prebuilt encryptor binary for this platform with the user's
-// arguments, under `name`: encrypt, decrypt, encryptor or the old aes256. The
+// arguments, under `name`: encrypt, decrypt or encryptor. The
 // binary tells from its name what to do, as it does when run through a link.
 
 const { spawn } = require("node:child_process");
@@ -20,9 +20,8 @@ module.exports = function run(name) {
     process.exit(1);
   }
 
-  // The binary sets the last-read times of its files back when it's done,
-  // including this Node.js and the link the command was run through.
-  const env = { ...process.env, ENCRYPTOR_NODE: process.execPath, ENCRYPTOR_LAUNCHED_AS: process.argv[1] };
+  // `encryptor update` uses the npm beside this Node.js.
+  const env = { ...process.env, ENCRYPTOR_NODE: process.execPath };
   const child = spawn(binary, process.argv.slice(2), { stdio: "inherit", argv0: name, env });
 
   // The binary handles Ctrl-C and similar signals itself, wiping keys and

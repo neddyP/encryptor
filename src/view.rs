@@ -20,7 +20,7 @@ use crate::keys::{self, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, choose, confirm, safe_path};
-use crate::{encrypt, history, pager, protect, recording, session, stream, timestamps};
+use crate::{encrypt, history, pager, protect, recording, session, stream};
 
 /// Locked memory needed beyond the file itself: the stack, the chunk being
 /// decrypted, the screen being drawn, the key and the answers typed.
@@ -174,16 +174,9 @@ fn decrypt_to_memory(
 /// it, for the message afterwards.
 fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
     let input = &viewed.input;
-    // The folders this writes in (for the file, a new key and a saved
-    // summary) have their modified times set back when this returns.
-    let _dir_times = timestamps::DirTimes::capture([
-        files::parent_dir(input),
-        keys::folder().unwrap_or_default(),
-        std::env::current_dir().unwrap_or_default(),
-    ]);
     let mut new_key_file = UnusedKeyFile::default();
     let (secret, source) = keys::establish(&viewed.plain_name, &mut new_key_file, &Options::default())?;
-    let history = history::clean(Some(secret.held()));
+    let history = history::clean(secret.held());
     let header = stream::header(secret.kdf()).map_err(|e| explain::stream_failure(e, input, input, None))?;
     let key = secret.key_for(&header)?;
 
@@ -245,7 +238,5 @@ fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
         ("Key and data", protect::memory_status().into()),
         ("Shell history", history),
     ]);
-    let mut secrets = vec![safe_path(input)];
-    secrets.extend(encrypt::key_path(&source).map(safe_path));
-    report::show("RE-ENCRYPTION SUCCESSFUL", &rows, "encryption-summary", true, &secrets)
+    report::show("RE-ENCRYPTION SUCCESSFUL", &rows, "encryption-summary", true)
 }
