@@ -217,7 +217,7 @@ pub fn is_direction_control(c: char) -> bool {
 fn note_piped_answers() {
     static NOTED: AtomicBool = AtomicBool::new(false);
     if !NOTED.swap(true, Ordering::SeqCst) {
-        eprintln!("note: answering questions through a pipe stops working in 3.0. Use options instead,");
+        eprintln!("note: answering questions through a pipe stops working in 4.0. Use options instead,");
         eprintln!("such as --key-file, --new-key and --yes; see encryptor --help.");
     }
 }

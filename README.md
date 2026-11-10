@@ -673,7 +673,7 @@ The exit status says what happened:
 | 130    | Interrupted                                              |
 
 Answers piped into standard input still work, read line by line in the order
-the questions are asked, but print a note, and stop working in 3.0. Which
+the questions are asked, but print a note, and stop working in 4.0. Which
 questions get asked depends on things a script can't see, such as whether the
 output already exists, so answers can land on the wrong question. Two
 questions are therefore never answered from a pipe:

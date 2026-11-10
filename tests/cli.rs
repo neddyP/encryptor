@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
 const BIN: &str = env!("CARGO_BIN_EXE_encryptor");
-const PIPE_NOTE: &str = "answering questions through a pipe stops working in 3.0";
+const PIPE_NOTE: &str = "answering questions through a pipe stops working in 4.0";
 
 /// A folder of its own for one test, with HOME pointed at it so no real shell
 /// history is touched, and removed afterwards.

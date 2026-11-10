@@ -87,7 +87,7 @@ OPTIONS:
     -V, --version         show the version and the file formats it reads
 
 Without a terminal, as in scripts, use options rather than piping answers
-in: piped answers still work, but stop in 3.0.
+in: piped answers still work, but stop in 4.0.
 
 EXIT STATUS:
     0 success, 2 bad options, 3 wrong key or damaged file,
