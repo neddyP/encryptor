@@ -189,7 +189,6 @@ enum Plan {
 }
 
 /// How each file of a batch gets a secret of its own.
-#[derive(Clone, Copy)]
 enum Each {
     Generate(Recipe),
     Enter,
@@ -258,7 +257,7 @@ fn seal(
             let mut own_file = UnusedKeyFile::default();
             let name = input.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let (secret, source) = match each {
-                Each::Generate(recipe) => keys::generate_for(input, *recipe, &mut own_file)?,
+                Each::Generate(recipe) => keys::generate_for(input, recipe, &mut own_file)?,
                 Each::Enter => {
                     eprintln!("Key for {}:", safe(&name));
                     keys::enter_new_key()?
@@ -807,9 +806,13 @@ fn history_summary(statuses: &[String]) -> String {
 fn separate_storage(done: &[Sealed]) -> String {
     let (mut saved, mut shown) = (0, 0);
     let mut captured = Vec::new();
+    let mut folders = Vec::new();
     for sealed in done {
         let Some(KeySource::Generated { saved_to, printed }) = &sealed.source else { continue };
-        saved += usize::from(saved_to.is_some());
+        if let Some(path) = saved_to {
+            saved += 1;
+            folders.push(files::folder(path));
+        }
         match printed {
             Printed::Erased => shown += 1,
             Printed::Captured(by) => captured.push(format!("{} (by {by})", safe_path(&sealed.input))),
@@ -819,7 +822,10 @@ fn separate_storage(done: &[Sealed]) -> String {
     let keys = |n: usize| if n == 1 { "1 key".to_string() } else { format!("{n} keys") };
     let mut parts = Vec::new();
     if saved > 0 {
-        let place = keys::folder().map_or_else(|| "the keys folder".into(), |dir| home_path(&dir));
+        let place = match folders.first() {
+            Some(first) if folders.iter().all(|folder| folder == first) => home_path(first),
+            _ => "their folders".into(),
+        };
         parts.push(format!("{} saved in {place}, each named after its file (owner read/write only)", keys(saved)));
     }
     if shown > 0 {

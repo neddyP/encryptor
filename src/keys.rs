@@ -168,8 +168,9 @@ pub fn establish_kind(kind: Kind, input: &Path, key_file: &mut UnusedKeyFile) ->
     eprintln!("Key generated (not displayed).");
 
     let mut saved_to = None;
-    if confirm(&format!("Save the key to a file in {}?", place()))? {
-        saved_to = Some(save(&key, input, key_file)?);
+    if confirm("Save the key to a file?")? {
+        let to = choose_save_to(false)?;
+        saved_to = Some(save(&key, input, key_file, &to)?);
     }
     let printed = if confirm("Print the key?")? { print(&key, None)? } else { Printed::No };
     let (saved_to, printed) = kept_somewhere(&key, input, key_file, saved_to, printed, None)?;
@@ -184,11 +185,11 @@ pub fn enter_new_key() -> Result<(Secret, KeySource)> {
     Ok((Secret::Key(key), KeySource::Entered))
 }
 
-/// How each file of a batch gets a random key of its own: saved, printed or
-/// both, asked once for them all.
-#[derive(Clone, Copy)]
+/// How each file of a batch gets a random key of its own: saved, and where,
+/// printed, or both, asked once for them all.
+#[derive(Clone)]
 pub struct Recipe {
-    pub save: bool,
+    pub save: Option<SaveTo>,
     pub print: bool,
 }
 
@@ -198,25 +199,33 @@ pub fn choose_recipe(count: usize) -> Result<Option<Recipe>> {
     if !confirm(&format!("Generate a random 256-bit key for each of the {count} files?"))? {
         return Ok(None);
     }
-    let save = confirm(&format!("Save each key to a file in {}, named after its file?", place()))?;
+    let save = match confirm("Save each key to a file, named after its file?")? {
+        true => Some(choose_save_to(true)?),
+        false => None,
+    };
     let print = confirm("Print each key?")?;
-    if save || print {
+    if save.is_some() || print {
         return Ok(Some(Recipe { save, print }));
     }
     // As for one file, a key neither saved nor printed would lose its file.
     eprintln!();
     eprintln!("WARNING: keys neither saved nor printed are lost once this program exits, and");
     eprintln!("their files could never be decrypted.");
-    let save = choose("Print or save each key?", &["print", "save"])? == "save";
-    Ok(Some(Recipe { save, print: !save }))
+    Ok(Some(match choose("Print or save each key?", &["print", "save"])? {
+        "save" => Recipe { save: Some(choose_save_to(true)?), print: false },
+        _ => Recipe { save: None, print: true },
+    }))
 }
 
 /// A new random key for `input`, one file of a batch, saved and printed as
 /// `recipe` says.
-pub fn generate_for(input: &Path, recipe: Recipe, key_file: &mut UnusedKeyFile) -> Result<(Secret, KeySource)> {
+pub fn generate_for(input: &Path, recipe: &Recipe, key_file: &mut UnusedKeyFile) -> Result<(Secret, KeySource)> {
     let key = generate()?;
     let name = input.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let saved_to = if recipe.save { Some(save(&key, input, key_file)?) } else { None };
+    let saved_to = match &recipe.save {
+        Some(to) => Some(save(&key, input, key_file, to)?),
+        None => None,
+    };
     let printed = if recipe.print { print(&key, Some(&name))? } else { Printed::No };
     let (saved_to, printed) = kept_somewhere(&key, input, key_file, saved_to, printed, Some(&name))?;
     Ok((Secret::Key(key), KeySource::Generated { saved_to, printed }))
@@ -247,7 +256,8 @@ fn kept_somewhere(
     eprintln!("the encrypted file could never be decrypted.");
     loop {
         if choose("Print or save the key?", &["print", "save"])? == "save" {
-            return Ok((Some(save(key, input, key_file)?), Printed::No));
+            let to = choose_save_to(false)?;
+            return Ok((Some(save(key, input, key_file, &to)?), Printed::No));
         }
         let printed = print(key, label)?;
         if printed != Printed::No {
@@ -364,13 +374,80 @@ fn beside(key: &Path, input: &Path) -> bool {
     folder(key).is_some_and(|dir| Some(dir) == folder(input))
 }
 
-/// Saves the key in the keys folder, tells the user where, and hands the file
-/// to `key_file` to shred if encryption doesn't complete.
-fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile) -> Result<PathBuf> {
-    let path = write_key_file(key, input, &open_folder()?)?;
+/// Where a new key file is saved.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaveTo {
+    /// The keys folder, named after its file.
+    KeysFolder,
+    /// A folder the user named, named after its file.
+    Folder(PathBuf),
+    /// Exactly this file, which doesn't exist yet.
+    File(PathBuf),
+}
+
+/// Asks where to save a new key file: the keys folder, or a path the user
+/// types, as `--new-key` takes. With `several` keys the path has to be a
+/// folder, as each key is named after its file.
+fn choose_save_to(several: bool) -> Result<SaveTo> {
+    let files = if several { ".key files" } else { ".key file" };
+    if confirm(&format!("Save the {files} to {}?", place()))? {
+        return Ok(SaveTo::KeysFolder);
+    }
+    let prompt = match several {
+        true => "Folder to save the .key files in: ",
+        false => "Path to save the .key file to (a folder, or the file's full path): ",
+    };
+    for _ in 0..3 {
+        let typed = term::read_line(prompt)?;
+        if typed.is_empty() {
+            eprintln!("  Nothing was entered.");
+            continue;
+        }
+        match save_to(&clean_path(&typed), several) {
+            Ok(to) => return Ok(to),
+            Err(e) => eprintln!("  {e}"),
+        }
+    }
+    Err(Error::File(format!(
+        "no place to save the {files} after 3 attempts.\nRun encrypt again, and save to {} or give a {} \
+         that exists and you can write to.",
+        place(),
+        if several { "folder" } else { "folder or path in a folder" }
+    )))
+}
+
+/// Where `path`, as typed, says to save a new key: in it if it's a folder,
+/// otherwise as it, if it's free and can be written there.
+fn save_to(path: &Path, several: bool) -> Result<SaveTo> {
+    if path.is_dir() {
+        files::check_writable(&path.join("encryptor.key"))?;
+        return Ok(SaveTo::Folder(path.to_path_buf()));
+    }
+    if several {
+        return Err(Error::File(format!(
+            "{} isn't a folder. Each key is named after its file, so give a folder that exists.",
+            safe_path(path)
+        )));
+    }
+    check_new_key(path)?;
+    Ok(SaveTo::File(path.to_path_buf()))
+}
+
+/// Saves the key where `to` says, tells the user where, warns if that's
+/// beside the encrypted file, and hands the file to `key_file` to shred if
+/// encryption doesn't complete.
+fn save(key: &[u8; KEY_LEN], input: &Path, key_file: &mut UnusedKeyFile, to: &SaveTo) -> Result<PathBuf> {
+    let path = match to {
+        SaveTo::KeysFolder => write_key_file(key, input, &open_folder()?)?,
+        SaveTo::Folder(dir) => write_key_file(key, input, dir)?,
+        SaveTo::File(path) => write_key_file_at(key, path)?,
+    };
     key_file.0 = Some(path.clone());
     eprintln!("Key saved as: {}", home_path(&path));
     session::remember(format!("Key saved as: {}", home_path(&path)));
+    if *to != SaveTo::KeysFolder && beside(&path, input) {
+        eprintln!("{}", explain::key_beside_file(&path));
+    }
     eprintln!("Keep it safe: anyone with it can decrypt the file, and without it no one can.");
     Ok(path)
 }
@@ -454,6 +531,13 @@ fn write_key_file_at(key: &[u8; KEY_LEN], path: &Path) -> Result<PathBuf> {
 pub fn check_new_key(destination: &Path) -> Result<()> {
     if destination.is_dir() {
         return crate::files::check_writable(&destination.join("encryptor.key"));
+    }
+    // Ending in a slash, it names a folder, which isn't there.
+    if destination.as_os_str().as_bytes().ends_with(b"/") {
+        return Err(Error::File(format!(
+            "there's no folder {}. Make it first, or give one that exists.",
+            safe_path(destination)
+        )));
     }
     if fs::symlink_metadata(destination).is_ok() {
         return Err(Created::Taken.error_for(destination));

@@ -277,8 +277,8 @@ fn still_takes_piped_answers_but_says_they_are_going() {
     }
     let dir = Scratch::new("piped");
     dir.write("old.txt", b"old style");
-    // A key, generated, saved, not printed, then encrypt.
-    let run = dir.run(&["encrypt", "old.txt"], "ky\ny\ny\nn\ny\n");
+    // A key, generated, saved in the keys folder, not printed, then encrypt.
+    let run = dir.run(&["encrypt", "old.txt"], "ky\ny\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains(PIPE_NOTE), "{}", run.stderr());
     assert!(dir.exists("old.txt.enc") && dir.exists(".local/share/encryptor/keys/old.txt.key"));
@@ -460,7 +460,7 @@ fn saves_generated_keys_in_a_private_folder_away_from_the_file() {
     }
     let dir = Scratch::new("keys-folder");
     dir.write("a.txt", b"a");
-    let run = dir.run(&["encrypt", "a.txt"], "ky\ny\ny\nn\ny\n");
+    let run = dir.run(&["encrypt", "a.txt"], "ky\ny\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains("Key saved as: ~/.local/share/encryptor/keys/a.txt.key"), "{}", run.stderr());
     let keys = dir.path(".local/share/encryptor/keys");
@@ -549,9 +549,49 @@ fn refuses_a_weak_passphrase() {
     assert!(run.stderr().contains("It also needs a special character"), "{}", run.stderr());
     assert!(dir.exists("a.txt") && !dir.exists("a.txt.enc"));
     // The old one-letter answers aren't taken.
-    let run = dir.run(&["encrypt", "a.txt"], "k\nky\ny\ny\nn\ny\n");
+    let run = dir.run(&["encrypt", "a.txt"], "k\nky\ny\ny\ny\nn\ny\n");
     assert!(run.stderr().contains("please answer ky or ps"), "{}", run.stderr());
     assert_eq!(run.code(), 0, "{}", run.stderr());
+}
+
+#[test]
+fn saves_a_generated_key_where_the_user_says() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("save-where");
+    fs::create_dir(dir.path("usb")).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        dir.write(name, name.as_bytes());
+    }
+    // Not the keys folder: a folder that isn't there is asked again, then
+    // one that is.
+    let run = dir.run(&["encrypt", "a.txt"], "ky\ny\ny\nn\nnowhere/\nusb\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("Save the .key file to ~/.local/share/encryptor/keys? [y/n]"), "{}", run.stderr());
+    assert_eq!(run.stderr().matches("Path to save the .key file to").count(), 2, "{}", run.stderr());
+    assert!(run.stderr().contains("there's no folder nowhere/"), "{}", run.stderr());
+    assert!(dir.exists("usb/a.txt.key") && !dir.exists(".local/share/encryptor/keys/a.txt.key"));
+
+    // A full path, and the current folder, beside the file, with a warning.
+    let run = dir.run(&["encrypt", "b.txt"], "ky\ny\ny\nn\nusb/mine.key\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(dir.exists("usb/mine.key"));
+    let run = dir.run(&["encrypt", "c.txt"], "ky\ny\ny\nn\n.\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("is in the same folder as the encrypted file"), "{}", run.stderr());
+    assert!(dir.exists("c.txt.key"));
+
+    // A key each, in one folder: a file's path isn't taken.
+    let run = dir.run(&["encrypt", "d.txt", "e.txt"], "ky\ns\ny\ny\nn\nusb/mine.key\nusb\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("isn't a folder. Each key is named after its file"), "{}", run.stderr());
+    assert!(dir.exists("usb/d.txt.key") && dir.exists("usb/e.txt.key"));
+    assert!(run.stdout().contains("2 keys saved in usb"), "{}", run.stdout());
+
+    let run = dir.run(&["decrypt", "a.txt.enc", "-k", "usb/a.txt.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(dir.read("a.txt"), b"a.txt");
 }
 
 #[test]
@@ -596,8 +636,8 @@ fn encrypts_a_folder_with_a_universal_key_named_after_it() {
     assert_eq!(run.code(), 4);
     assert!(run.stderr().contains("encrypt -r docs"), "{}", run.stderr());
 
-    // Key, universal, generate, save, don't print, encrypt.
-    let run = dir.run(&["encrypt", "-r", "docs"], "ky\nu\ny\ny\nn\ny\n");
+    // Key, universal, generate, save in the keys folder, don't print, encrypt.
+    let run = dir.run(&["encrypt", "-r", "docs"], "ky\nu\ny\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains("[u/s]"), "{}", run.stderr());
     let key = ".local/share/encryptor/keys/docs.key";
@@ -622,8 +662,9 @@ fn gives_each_file_a_key_of_its_own() {
     let dir = Scratch::new("separate");
     dir.write("a.txt", b"a");
     dir.write("b.txt", b"b");
-    // Key, separate, generate each, save each, don't print, encrypt.
-    let run = dir.run(&["encrypt", "a.txt", "b.txt"], "ky\ns\ny\ny\nn\ny\n");
+    // Key, separate, generate each, save each in the keys folder, don't print,
+    // encrypt.
+    let run = dir.run(&["encrypt", "a.txt", "b.txt"], "ky\ns\ny\ny\ny\nn\ny\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     let keys = ".local/share/encryptor/keys";
     assert!(dir.exists(&format!("{keys}/a.txt.key")) && dir.exists(&format!("{keys}/b.txt.key")));

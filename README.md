@@ -356,7 +356,8 @@ $ encrypt report.pdf
 Use a 256-bit key or a custom passphrase? [ky/ps]: ky
 Generate a random 256-bit key? [y/n]: y
 Key generated (not displayed).
-Save the key to a file in ~/.local/share/encryptor/keys? [y/n]: y
+Save the key to a file? [y/n]: y
+Save the .key file to ~/.local/share/encryptor/keys? [y/n]: y
 Key saved as: ~/.local/share/encryptor/keys/report.pdf.key
 Keep it safe: anyone with it can decrypt the file, and without it no one can.
 Print the key? [y/n]: n
@@ -410,13 +411,17 @@ The prompts go in this order:
    can't open files made with these settings unless run as root.
 2. **Generate a random key?** Answer `n` to enter your own key instead; the
    save and print questions are then skipped.
-3. **Save the key as a file?** `y` saves it as a 32-byte binary file named
-   `<file>.key` (with a number added if that's taken) in
-   `~/.local/share/encryptor/keys`, or `$XDG_DATA_HOME/encryptor/keys`. Only
-   you can open that folder, and it's away from your files, so copying,
-   backing up or syncing their folder doesn't take the key with them. To
-   save a key somewhere else, use `--new-key PATH`; you're warned if that's
-   beside the encrypted file.
+3. **Save the key as a file?** `y` saves it as a 32-byte binary file, and
+   asks where: `y` to the next question puts it in
+   `~/.local/share/encryptor/keys`, or `$XDG_DATA_HOME/encryptor/keys`, named
+   `<file>.key` (with a number added if that's taken). Only you can open
+   that folder, and it's away from your files, so copying, backing up or
+   syncing their folder doesn't take the key with them. `n` asks you to type
+   another place, as `--new-key PATH` takes: a folder, where it's named after
+   the file, or the key file's full path, such as
+   `/media/you/USB/report.key`. A place that isn't there or can't be written
+   to is asked again, up to 3 times, and you're warned if it's beside the
+   encrypted file. With several files and a key each, it has to be a folder.
 4. **Print the key?** `y` clears the screen and shows the key once as 64
    hex characters; press Enter when you've written it down and it's erased,
    and the screen is drawn again with the file and key file so far. The key
