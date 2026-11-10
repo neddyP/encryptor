@@ -1,6 +1,6 @@
 {
   "name": "@neddyp/encryptor",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Encrypt and decrypt files with AES-256-GCM from the command line",
   "keywords": [
     "encryption",
@@ -26,10 +26,10 @@
     "lib"
   ],
   "optionalDependencies": {
-    "@neddyp/encryptor-darwin-arm64": "3.0.0",
-    "@neddyp/encryptor-darwin-x64": "3.0.0",
-    "@neddyp/encryptor-linux-arm64": "3.0.0",
-    "@neddyp/encryptor-linux-x64": "3.0.0"
+    "@neddyp/encryptor-darwin-arm64": "3.0.1",
+    "@neddyp/encryptor-darwin-x64": "3.0.1",
+    "@neddyp/encryptor-linux-arm64": "3.0.1",
+    "@neddyp/encryptor-linux-x64": "3.0.1"
   },
   "os": [
     "linux",
