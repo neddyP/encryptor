@@ -168,39 +168,23 @@ jobs:
           pattern: bin-*
           merge-multiple: true
           path: binaries
-      # One package for each platform's binary, and @neddyp/encryptor, which
-      # depends on them, so npm installs only the one a system needs.
       - name: Stage and pack
         run: |
           npm/stage.sh binaries
-          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
-            npm pack "./npm/platforms/$platform"
-          done
           npm pack ./npm
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package
           path: neddyp-encryptor-*.tgz
           if-no-files-found: error
-      # The platform packages go first, so that @neddyp/encryptor is never
-      # on npm without them. One already there, from a run that failed after
-      # publishing it, is left as it is. With provenance, npm records that
-      # this workflow, from this commit, built each package, and shows it on
-      # the package's page.
+      # With provenance, npm records that this workflow, from this commit,
+      # built the package, and shows it on the package's page.
       - name: Publish
-        if: needs.plan.outputs.mode == 'publish' || needs.plan.outputs.mode == 'dry-run'
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          DRY_RUN: ${{ needs.plan.outputs.mode == 'dry-run' && '--dry-run' || '' }}
-        run: |
-          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
-            if [ -z "$DRY_RUN" ] && [ -n "$(npm view "@neddyp/encryptor-$platform@$VERSION" version 2>/dev/null)" ]; then
-              echo "@neddyp/encryptor-$platform@$VERSION is already on npm"
-              continue
-            fi
-            npm publish "./neddyp-encryptor-$platform-$VERSION.tgz" --provenance $DRY_RUN
-          done
-          npm publish "./neddyp-encryptor-$VERSION.tgz" --provenance $DRY_RUN
+        if: needs.plan.outputs.mode == 'publish'
+        run: npm publish ./neddyp-encryptor-*.tgz --provenance
+      - name: Publish (dry run)
+        if: needs.plan.outputs.mode == 'dry-run'
+        run: npm publish ./neddyp-encryptor-*.tgz --provenance --dry-run
 
   github-release:
     name: Attach binaries to the GitHub release

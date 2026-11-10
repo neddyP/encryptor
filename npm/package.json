@@ -23,14 +23,9 @@
   },
   "files": [
     "bin",
-    "lib"
+    "lib",
+    "vendor"
   ],
-  "optionalDependencies": {
-    "@neddyp/encryptor-darwin-arm64": "3.0.1",
-    "@neddyp/encryptor-darwin-x64": "3.0.1",
-    "@neddyp/encryptor-linux-arm64": "3.0.1",
-    "@neddyp/encryptor-linux-x64": "3.0.1"
-  },
   "os": [
     "linux",
     "darwin"

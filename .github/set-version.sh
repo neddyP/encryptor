@@ -16,5 +16,3 @@ esac
 perl -0777 -pi -e 's/^version = ".*"$/version = "$ENV{VERSION}"/m' Cargo.toml
 perl -0777 -pi -e 's/^(name = "encryptor"\nversion = )".*"$/$1"$ENV{VERSION}"/m' Cargo.lock
 perl -0777 -pi -e 's/^(  "version": )".*"/$1"$ENV{VERSION}"/m' npm/package.json
-# And the platform packages it depends on, which are released with it.
-perl -pi -e 's/^(    "\@neddyp\/encryptor-[a-z0-9-]+": )".*"/$1"$ENV{VERSION}"/' npm/package.json
