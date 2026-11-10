@@ -627,10 +627,12 @@ fn warns_of_a_folder_key_kept_among_its_files() {
     assert!(run.stderr().contains(warning), "{}", run.stderr());
     decrypt_with("docs/new.key");
 
-    // Beside the folder rather than in it, nothing is said.
+    // Beside the folder rather than in it, nothing is said about the key.
+    // (Other warnings can appear, such as macOS's about APFS.)
     let run = dir.run(&["encrypt", "-r", "docs", "--new-key", "outside.key", "-y", "-q"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
-    assert!(!run.stderr().contains("WARNING"), "{}", run.stderr());
+    assert!(!run.stderr().contains(warning), "{}", run.stderr());
+    assert!(!run.stderr().contains("in the same folder as the encrypted file"), "{}", run.stderr());
     assert!(dir.exists("docs/a.txt.enc") && dir.exists("outside.key"));
 }
 
