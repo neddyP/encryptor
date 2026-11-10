@@ -12,6 +12,10 @@
     "decrypt"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neddyP/encryptor.git"
+  },
   "bin": {
     "encryptor": "bin/encryptor.js",
     "encrypt": "bin/encrypt.js",
