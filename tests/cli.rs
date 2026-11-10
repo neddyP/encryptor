@@ -595,6 +595,45 @@ fn saves_a_generated_key_where_the_user_says() {
 }
 
 #[test]
+fn warns_of_a_folder_key_kept_among_its_files() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("key-among");
+    fs::create_dir_all(dir.path("docs/sub")).unwrap();
+    dir.write("docs/a.txt", b"a");
+    dir.write("docs/sub/b.txt", b"b");
+    let warning = "is in a folder with files it encrypts";
+    let decrypt_with = |key: &str| {
+        let run = dir.run(&["decrypt", "-r", "docs", "-k", key, "-y", "-q"], "");
+        assert_eq!(run.code(), 0, "{}", run.stderr());
+        // decrypt keeps the .enc files; clear them so the next encrypt can run.
+        for name in [key, "docs/a.txt.enc", "docs/sub/b.txt.enc"] {
+            fs::remove_file(dir.path(name)).unwrap();
+        }
+    };
+
+    // Saved inside the folder when asked where: warned, and not encrypted.
+    let run = dir.run(&["encrypt", "-r", "docs"], "ky\nu\ny\ny\nn\ndocs/sub\nn\ny\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains(warning), "{}", run.stderr());
+    assert!(dir.exists("docs/sub/docs.key") && !dir.exists("docs/sub/docs.key.enc"));
+    decrypt_with("docs/sub/docs.key");
+
+    // The same with --new-key.
+    let run = dir.run(&["encrypt", "-r", "docs", "--new-key", "docs/new.key", "-y", "-q"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains(warning), "{}", run.stderr());
+    decrypt_with("docs/new.key");
+
+    // Beside the folder rather than in it, nothing is said.
+    let run = dir.run(&["encrypt", "-r", "docs", "--new-key", "outside.key", "-y", "-q"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(!run.stderr().contains("WARNING"), "{}", run.stderr());
+    assert!(dir.exists("docs/a.txt.enc") && dir.exists("outside.key"));
+}
+
+#[test]
 fn encrypts_and_decrypts_several_files_with_one_key() {
     if !runnable() {
         return;

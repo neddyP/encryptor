@@ -45,6 +45,8 @@ struct Found {
     /// What a universal key is named after: the folder given, or else the
     /// folder the files are all in.
     name: String,
+    /// The folders given with -r, as they really are.
+    folders: Vec<PathBuf>,
 }
 
 /// Encrypts each of the files named in `args`, and with -r every file in the
@@ -96,6 +98,11 @@ pub fn encrypt(args: &[String], options: &Options) -> Result<()> {
 
     let mut universal_file = UnusedKeyFile::default();
     let plan = plan(&found, &mut universal_file, options)?;
+    if let Plan::Universal(_, KeySource::Generated { saved_to: Some(key), .. }) = &plan
+        && key_among(key, &found)
+    {
+        eprintln!("{}", explain::key_among_files(key));
+    }
     let mut history_status = match &plan {
         Plan::Universal(secret, _) => vec![history::clean(secret.held())],
         Plan::Separate(_) => Vec::new(),
@@ -606,6 +613,7 @@ fn collect(command: &str, args: &[String], options: &Options) -> Result<Found> {
         files: walk.files,
         left_out: walk.left_out.describe(),
         name: name.filter(|name| !name.is_empty()).unwrap_or_else(|| "files".into()),
+        folders: folders.iter().filter_map(|folder| fs::canonicalize(folder).ok()).collect(),
     })
 }
 
@@ -713,6 +721,22 @@ impl LeftOut {
         }
         notes
     }
+}
+
+/// Whether a new key file at `key` is among the files it encrypts: in a
+/// folder given with -r, or in the same folder as one of the files, so a copy
+/// of their folder takes the key with it. It's never encrypted itself, as the
+/// files were found before it was made.
+fn key_among(key: &Path, found: &Found) -> bool {
+    let Ok(dir) = fs::canonicalize(files::folder(key)) else { return false };
+    if found.folders.iter().any(|folder| dir.starts_with(folder)) {
+        return true;
+    }
+    let mut seen = HashSet::new();
+    found.files.iter().any(|file| {
+        let folder = files::folder(file);
+        seen.insert(folder) && fs::canonicalize(folder).is_ok_and(|folder| folder == dir)
+    })
 }
 
 /// The name of a folder, as it really is, so `.` is named too.

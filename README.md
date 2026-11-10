@@ -421,7 +421,9 @@ The prompts go in this order:
    the file, or the key file's full path, such as
    `/media/you/USB/report.key`. A place that isn't there or can't be written
    to is asked again, up to 3 times, and you're warned if it's beside the
-   encrypted file. With several files and a key each, it has to be a folder.
+   encrypted file, or, for a folder key, inside a folder being encrypted
+   (the key itself is never encrypted). With several files and a key each,
+   it has to be a folder.
 4. **Print the key?** `y` clears the screen and shows the key once as 64
    hex characters; press Enter when you've written it down and it's erased,
    and the screen is drawn again with the file and key file so far. The key

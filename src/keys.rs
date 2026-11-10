@@ -368,8 +368,13 @@ fn open_folder() -> Result<PathBuf> {
 }
 
 /// Whether the key file at `key` is in the same folder as `input`, where the
-/// encrypted file goes.
+/// encrypted file goes. A batch's universal key is named after the batch,
+/// not a file, so there's no file to be beside: the batch checks against its
+/// files itself.
 fn beside(key: &Path, input: &Path) -> bool {
+    if !fs::symlink_metadata(input).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
     let folder = |path: &Path| fs::canonicalize(files::folder(path)).ok();
     folder(key).is_some_and(|dir| Some(dir) == folder(input))
 }

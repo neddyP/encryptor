@@ -345,6 +345,15 @@ pub fn keys_folder_not_own(dir: &Path) -> String {
     )
 }
 
+/// A batch's universal key saved in a folder with the files it encrypts.
+pub fn key_among_files(key: &Path) -> String {
+    format!(
+        "WARNING: the key, {}, is in a folder with files it encrypts, so anyone who gets a copy of the \
+         folder gets the key too. Keep it somewhere else.",
+        safe_path(key)
+    )
+}
+
 /// A key saved with --new-key in the folder the encrypted file goes in.
 pub fn key_beside_file(key: &Path) -> String {
     format!(
