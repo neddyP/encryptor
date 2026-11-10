@@ -3,22 +3,39 @@
 // Runs the prebuilt encryptor binary for this platform with the user's
 // arguments, under `name`: encrypt, decrypt or encryptor. The
 // binary tells from its name what to do, as it does when run through a link.
+//
+// Each platform's binary is in a package of its own, such as
+// @neddyp/encryptor-linux-x64, which npm installs only on that platform.
 
 const { spawn } = require("node:child_process");
-const fs = require("node:fs");
 const path = require("node:path");
 
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
+const PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"];
 
-module.exports = function run(name) {
-  const platform = `${process.platform}-${process.arch}`;
-  const binary = path.join(__dirname, "..", "vendor", platform, "encryptor");
-  if (!fs.existsSync(binary)) {
+function binaryFor(platform) {
+  if (!PLATFORMS.includes(platform)) {
     console.error(
       `encryptor: no binary for ${platform}. Supported: Linux and macOS on x64 and arm64.`
     );
     process.exit(1);
   }
+  const pkg = `@neddyp/encryptor-${platform}`;
+  try {
+    return path.join(path.dirname(require.resolve(`${pkg}/package.json`)), "encryptor");
+  } catch {
+    console.error(
+      `encryptor: ${pkg}, which holds the binary for this system, isn't installed. ` +
+        `npm leaves it out when optional dependencies are turned off ` +
+        `(--omit=optional, or optional=false in .npmrc). Install again with them on:\n` +
+        `  npm install -g @neddyp/encryptor`
+    );
+    process.exit(1);
+  }
+}
+
+module.exports = function run(name) {
+  const binary = binaryFor(`${process.platform}-${process.arch}`);
 
   // `encryptor update` uses the npm beside this Node.js.
   const env = { ...process.env, ENCRYPTOR_NODE: process.execPath };

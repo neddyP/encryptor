@@ -1,6 +1,6 @@
 /target
 *.key
 *.tgz
-/npm/vendor/
+/npm/platforms/
 /npm/README.md
 /npm/LICENSE

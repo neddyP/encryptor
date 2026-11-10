@@ -78,13 +78,19 @@ fn install_of(exe: &Path, home: Option<&Path>) -> Install {
     {
         return Install::Script(dir.to_path_buf());
     }
-    // npm installs global packages in <prefix>/lib/node_modules, and the
-    // package keeps the binary in vendor/<platform>.
+    // npm installs global packages in <prefix>/lib/node_modules, each with
+    // its dependencies in a node_modules of its own. The binary is in the
+    // package for its platform, such as @neddyp/encryptor-linux-x64, which
+    // @neddyp/encryptor depends on.
     let dirs: Vec<&Path> = exe.ancestors().collect();
     let name = |i: usize| dirs.get(i).and_then(|dir| dir.file_name()).and_then(|name| name.to_str());
-    let layout = [(2, "vendor"), (3, "encryptor"), (4, "@neddyp"), (5, "node_modules"), (6, "lib")];
-    match dirs.get(7) {
-        Some(prefix) if layout.iter().all(|&(i, expected)| name(i) == Some(expected)) => {
+    let layout =
+        [(2, "@neddyp"), (3, "node_modules"), (4, "encryptor"), (5, "@neddyp"), (6, "node_modules"), (7, "lib")];
+    match dirs.get(8) {
+        Some(prefix)
+            if name(1).is_some_and(|name| name.starts_with("encryptor-"))
+                && layout.iter().all(|&(i, expected)| name(i) == Some(expected)) =>
+        {
             Install::Npm(prefix.to_path_buf())
         }
         _ => Install::Other,
@@ -143,16 +149,19 @@ mod tests {
         // Another user's, or without a home folder.
         assert_eq!(install("/home/you/.local/bin/encryptor"), Install::Other);
         assert_eq!(install_of(Path::new("/home/me/.local/bin/encryptor"), None), Install::Other);
+        let npm = "lib/node_modules/@neddyp/encryptor/node_modules/@neddyp";
         assert_eq!(
-            install("/usr/local/lib/node_modules/@neddyp/encryptor/vendor/linux-x64/encryptor"),
+            install(&format!("/usr/local/{npm}/encryptor-linux-x64/encryptor")),
             Install::Npm("/usr/local".into())
         );
         assert_eq!(
-            install("/home/me/.local/lib/node_modules/@neddyp/encryptor/vendor/darwin-arm64/encryptor"),
+            install(&format!("/home/me/.local/{npm}/encryptor-darwin-arm64/encryptor")),
             Install::Npm("/home/me/.local".into())
         );
-        // A project's own node_modules, not a global install.
-        assert_eq!(install("/home/me/app/node_modules/@neddyp/encryptor/vendor/linux-x64/encryptor"), Install::Other);
+        // A project's own node_modules, not a global install, and a package
+        // of someone else's.
+        assert_eq!(install("/home/me/app/node_modules/@neddyp/encryptor-linux-x64/encryptor"), Install::Other);
+        assert_eq!(install(&format!("/usr/local/{npm}/other/encryptor")), Install::Other);
         assert_eq!(install("/home/me/encryptor/target/release/encryptor"), Install::Other);
         assert_eq!(install("/usr/local/bin/other/encryptor"), Install::Other);
     }

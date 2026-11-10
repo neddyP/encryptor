@@ -144,8 +144,8 @@ or, if it went into `~/.local/bin`, the same there without `sudo`.
 ### With npm
 
 Works on Linux and macOS, on both x64 and arm64 (Apple Silicon), with
-Node.js 16 or newer. The package ships a prebuilt binary for each platform,
-so you don't need Rust.
+Node.js 16 or newer. npm installs only the prebuilt binary for your system,
+about 1 MB, so you don't need Rust.
 
 ```
 npm install -g @neddyp/encryptor
@@ -923,8 +923,8 @@ It uses the RustCrypto
 Releases are built and published by `.github/workflows/release.yml`, using
 npm trusted publishing so no npm token is stored in the repo. Each release
 tests and builds static Linux binaries (x64, arm64, and 32-bit x86 and arm)
-and macOS binaries (x64 and arm64). The x64 and arm64 ones are packed into
-the npm package, and all six are attached to the version's GitHub release as
+and macOS binaries (x64 and arm64). The x64 and arm64 ones go to npm, each in
+a package of its own, and all six are attached to the version's GitHub release as
 `encryptor-<os>-<arch>`, where install.sh downloads them from. A release you
 made by hand for the tag keeps its title and notes; otherwise one is made.
 
@@ -949,13 +949,23 @@ made by hand for the tag keeps its title and notes; otherwise one is made.
 - **Dry run.** Running the workflow by hand from the Actions tab does
   everything except the publish.
 
-Every run keeps the packed tarball as the `npm-package` artifact. The
+Every run keeps the packed tarballs as the `npm-package` artifact. The
 decision logic is in `.github/release-plan.sh`.
 
 The npm package lives in `npm/`. `bin/*.js` are small Node launchers that run
-the binary for the platform, `vendor/<platform>/encryptor`, under their own
-name, which tells it what to do. `npm/stage.sh` fills `vendor/` in from the
-build artifacts.
+the binary for the platform under their own name, which tells it what to do.
+Each binary is in a package of its own, `@neddyp/encryptor-<platform>`,
+limited by its `os` and `cpu` to the systems it runs on. `@neddyp/encryptor`
+names all four as optional dependencies, at its own version, and npm
+installs only the one that fits. `npm/stage.sh` makes them in
+`npm/platforms/` from the build artifacts, and the workflow publishes them
+before `@neddyp/encryptor`.
+
+A new platform package needs publishing once by hand before the workflow
+can publish it, as npm only lets a package that exists name a trusted
+publisher: publish a placeholder version with `npm publish --access public`,
+then in the package's settings on npmjs.com add the trusted publisher
+(GitHub Actions, `neddyP`, `encryptor`, `release.yml`).
 
 ### When a release fails
 
@@ -985,8 +995,10 @@ there and does nothing. Instead:
 
   ```
   gh run download <run-id> -n bin-linux -n bin-macos -D binaries
+  mv binaries/*/encryptor-* binaries/
+  (cd binaries && sha256sum encryptor-* > SHA256SUMS)
   gh release create v2.2.0 --verify-tag --title v2.2.0 --notes ""   # if it has no release yet
-  gh release upload v2.2.0 binaries/*/encryptor-* --clobber
+  gh release upload v2.2.0 binaries/encryptor-* binaries/SHA256SUMS --clobber
   ```
 
 Until a release has its binaries, install.sh and `encryptor update` keep
