@@ -1,0 +1,35 @@
+	=========================================================================
+
+	Welcome to Encryptor {version}!
+
+	Encryptor is a CLI tool built in Rust to perform a host of encryption functions using symmetric 256-bit AES-GCM and post-quantum asymmetric ML-KEM-1024 encryption standards.
+
+	=========================================================================
+
+	Compatibility:
+
+		We are a binary-level encryption program, so we are filetype agnostic: text, image, video, binary, zip, doesn't matter.
+		We use chunking to handle file(s) of any size, and can encrypt the contents of entire directories in one go!
+		The program can access any files your user has permission to read/write. If your file isn't in your current directory, please precede your file's name with its full path.
+
+	Commands:
+
+		encrypt example.pdf  -->  encrypts file to example.pdf.enc
+		decrypt example.pdf.enc  -->  decrypts file back to example.pdf
+		encryptor view example.pdf.enc  -->  temporary viewing of encrypted files without writing anything to disk (kept in memory, then zeroed out once exited, leaving the .enc file only)
+		encryptor  -->  shows this home screen
+		encryptor update  -->  self-explanatory
+
+	Command Flags:
+
+		-r, --recursive  -->  recursive encryption/decryption for whole directories
+		-V, --version  -->  shows program version
+		-h, --help  -->  shows this screen
+		-q, --quiet  -->  doesn't print the encryption/decryption summary
+		-y, --yes  -->  skips confirmation for encryption and decryption
+		--overwrite  -->  replaces any file with the same name in the same directory during decryption with the decryption's output
+		-o ~/PATH, --output ~/PATH  -->  writes the decrypted file to a specified location on your disk instead of next to the .enc file (decryption only)
+		--keep  -->  keeps the original unencrypted file rather than auto-deleting it post-encryption
+		--new-key ~/PATH  -->  encrypts file(s) with a new random key, and saves an example.pdf.key file to your desired location
+		-k, --key-file ~/PATH/example.pdf.key  -->  decrypts example.pdf.enc with its respective key file, or encrypts with an existing key file
+		-v, --view  -->  views the file instead of decrypting it to disk, the same as encryptor view

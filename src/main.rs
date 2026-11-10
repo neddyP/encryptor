@@ -50,6 +50,8 @@ const KEY_LEN: usize = 32;
 #[global_allocator]
 static ALLOCATOR: protect::ZeroOnFree = protect::ZeroOnFree;
 
+/// The commands and options in short, listed after an unknown one. --help
+/// shows the home screen's text instead (see home.txt).
 const USAGE: &str = "\
 encryptor - encrypt and decrypt files with AES-256-GCM
 
@@ -143,7 +145,7 @@ fn run(args: &[String]) -> Result<()> {
             None => return Ok(()),
         },
         Command::Help => {
-            print!("{USAGE}");
+            print!("{}", home::plain());
             return Ok(());
         }
         Command::Version => {
@@ -180,7 +182,7 @@ fn run(args: &[String]) -> Result<()> {
 /// Shows the home screen and returns the command chosen, with the art drawn
 /// again at the top for it, or `None` to quit, which ends the run at once.
 fn choose_at_home() -> Result<Option<Command>> {
-    let command = match home::show(USAGE, &version())? {
+    let command = match home::show()? {
         home::Choice::Encrypt => Command::Encrypt,
         home::Choice::Decrypt => Command::Decrypt,
         home::Choice::View => Command::View,

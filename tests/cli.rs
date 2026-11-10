@@ -301,7 +301,8 @@ fn answers_to_its_names() {
         path
     };
     let help = dir.run(&["--help"], "");
-    assert!(help.stdout().starts_with("encryptor - encrypt and decrypt files"), "{}", help.stdout());
+    let welcome = format!("Welcome to Encryptor {}!", env!("CARGO_PKG_VERSION"));
+    assert!(help.stdout().contains(&welcome), "{}", help.stdout());
     assert!(dir.run(&["-V"], "").stdout().starts_with("encryptor "));
 
     dir.write("x.txt", b"x");

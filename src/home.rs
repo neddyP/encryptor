@@ -1,8 +1,8 @@
-//! The home screen `encryptor` shows when run on its own in a terminal: the
-//! name in large letters, the version, the help, and keys to encrypt, decrypt
-//! or view a file. It is drawn on the alternate screen, like `less`, so the
-//! terminal is left as it was. In a session (see `session`), the run is on
-//! the alternate screen already.
+//! The home screen `encryptor` shows when run on its own in a terminal, and
+//! for --help: the name in large letters, the text in home.txt, and keys to
+//! encrypt, decrypt or view a file. It is drawn on the alternate screen, like
+//! `less`, so the terminal is left as it was. In a session (see `session`),
+//! the run is on the alternate screen already.
 
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
@@ -10,6 +10,20 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::term::{self, RawMode};
 use crate::{art, protect, session};
+
+/// The home screen's text, which --help prints too without a terminal. Edit
+/// home.txt to change it. In it:
+/// - `{version}` is replaced by the version, and its line is bold.
+/// - A line ending in `:` is a heading, in bold.
+/// - In a line with `-->`, what's before the arrow is bold, and the rest
+///   wraps to start under the text after the arrow.
+/// - A tab is 4 columns, and other long lines wrap under their own indent.
+const TEXT: &str = include_str!("home.txt");
+
+const ARROW: &str = "-->";
+const TAB: &str = "    ";
+/// Space on the left of everything on the screen.
+const MARGIN: &str = "  ";
 
 const KEYS: &str = " e encrypt   d decrypt   v view   q quit";
 
@@ -28,8 +42,14 @@ pub fn available() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal() && !term.is_empty() && term != "dumb"
 }
 
+/// The text as --help prints it without a terminal: unstyled, and wrapped to
+/// 80 columns.
+pub fn plain() -> String {
+    layout(TEXT, env!("CARGO_PKG_VERSION"), 80).into_iter().map(|line| line.text + "\n").collect()
+}
+
 /// Shows the home screen until a key chooses what to do.
-pub fn show(usage: &str, version: &str) -> Result<Choice> {
+pub fn show() -> Result<Choice> {
     let look = art::Look::detect();
     let _raw = RawMode::enter(libc::STDIN_FILENO)?;
     let _screen = Screen::enter()?;
@@ -45,7 +65,7 @@ pub fn show(usage: &str, version: &str) -> Result<Choice> {
         // classic 24 by 80 if the terminal doesn't say.
         let (rows, cols) = term::size(libc::STDOUT_FILENO).unwrap_or((24, 80));
         if laid_out != Some(cols) {
-            lines = content(usage, version, cols, look);
+            lines = content(TEXT, env!("CARGO_PKG_VERSION"), cols, look);
             laid_out = Some(cols);
         }
         if shown != Some((top, rows, cols)) {
@@ -71,14 +91,17 @@ pub fn show(usage: &str, version: &str) -> Result<Choice> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Style {
     /// Already coloured, and laid out for the width.
     Art,
-    Title,
+    Bold,
+    /// Bold for this many columns, then plain.
+    Entry(usize),
     Plain,
 }
 
+#[derive(Debug)]
 struct Line {
     text: String,
     style: Style,
@@ -86,17 +109,89 @@ struct Line {
 
 /// Everything on the home screen, top to bottom, with a margin on the left,
 /// for a window `cols` wide that can draw as `look` says.
-fn content(usage: &str, version: &str, cols: usize, look: art::Look) -> Vec<Line> {
-    let line = |text: &str, style| Line { text: format!("  {text}"), style };
-    let art = art::rows(cols.saturating_sub(2), look.utf8);
-    let mut lines: Vec<Line> =
-        art.iter().enumerate().map(|(i, row)| line(&art::paint(row, i, art.len(), look.colors), Style::Art)).collect();
+fn content(text: &str, version: &str, cols: usize, look: art::Look) -> Vec<Line> {
+    let width = cols.saturating_sub(MARGIN.len());
+    let art = art::rows(width, look.utf8);
+    let mut lines: Vec<Line> = art
+        .iter()
+        .enumerate()
+        .map(|(i, row)| Line { text: format!("{MARGIN}{}", art::paint(row, i, art.len(), look.colors)), style: Style::Art })
+        .collect();
     if !art.is_empty() {
-        lines.push(line("", Style::Plain));
+        lines.push(Line { text: String::new(), style: Style::Plain });
     }
-    lines.push(line(version, Style::Title));
-    lines.push(line("", Style::Plain));
-    lines.extend(usage.lines().map(|text| line(text, Style::Plain)));
+    lines.extend(layout(text, version, width).into_iter().map(|line| Line {
+        text: format!("{MARGIN}{}", line.text),
+        style: match line.style {
+            Style::Entry(bold) => Style::Entry(bold + MARGIN.len()),
+            style => style,
+        },
+    }));
+    lines
+}
+
+/// `text` laid out for `width` columns: each line styled and wrapped as
+/// TEXT's comment says.
+fn layout(text: &str, version: &str, width: usize) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        let expanded = raw.replace("{version}", version).replace('\t', TAB);
+        let line = expanded.trim_end();
+        let arrow = line.find(ARROW);
+        let style = match arrow {
+            _ if raw.contains("{version}") => Style::Bold,
+            None if line.ends_with(':') => Style::Bold,
+            Some(at) => Style::Entry(line[..at].trim_end().chars().count()),
+            None => Style::Plain,
+        };
+        for (n, text) in wrap(line, width).into_iter().enumerate() {
+            let style = match style {
+                Style::Entry(_) if n > 0 => Style::Plain,
+                style => style,
+            };
+            lines.push(Line { text, style });
+        }
+    }
+    lines
+}
+
+/// `line` cut at spaces into lines `width` columns wide or less. Lines after
+/// the first start under the text after an arrow, or else under the line's
+/// own indent; or, if that's past half the width, 4 columns in from it. A
+/// word wider than `width` gets a line of its own, and is cut when drawn.
+fn wrap(line: &str, width: usize) -> Vec<String> {
+    let columns = |text: &str| text.chars().count();
+    let indent = columns(line) - columns(line.trim_start());
+    let hang = match line.find(ARROW) {
+        Some(at) => {
+            let after = &line[at + ARROW.len()..];
+            columns(&line[..at + ARROW.len()]) + columns(after) - columns(after.trim_start())
+        }
+        None => indent,
+    };
+    let hang = if hang * 2 > width { (indent + TAB.len()).min(width / 2) } else { hang };
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+    let mut words = 0;
+    let mut rest = line;
+    while let Some(start) = rest.find(|c: char| c != ' ') {
+        let end = rest[start..].find(' ').map_or(rest.len(), |n| start + n);
+        let (gap, word) = (&rest[..start], &rest[start..end]);
+        rest = &rest[end..];
+        words += 1;
+        if words > 1 && used + columns(gap) + columns(word) > width {
+            lines.push(std::mem::replace(&mut current, " ".repeat(hang)));
+            used = hang;
+        } else {
+            current.push_str(gap);
+            used += columns(gap);
+        }
+        current.push_str(word);
+        used += columns(word);
+    }
+    lines.push(current);
     lines
 }
 
@@ -116,7 +211,11 @@ fn frame(lines: &[Line], top: usize, rows: usize, cols: usize) -> String {
         match line.style {
             // Laid out to fit already, and its colours aren't columns.
             Style::Art => out.push_str(&line.text),
-            Style::Title => out.push_str(&format!("\x1b[1m{text}\x1b[0m")),
+            Style::Bold => out.push_str(&format!("\x1b[1m{text}\x1b[0m")),
+            Style::Entry(bold) => {
+                let at = text.char_indices().nth(bold).map_or(text.len(), |(at, _)| at);
+                out.push_str(&format!("\x1b[1m{}\x1b[0m{}", &text[..at], &text[at..]));
+            }
             Style::Plain => out.push_str(&text),
         }
         out.push_str("\x1b[K\r\n");
@@ -231,33 +330,59 @@ mod tests {
     const ASCII: art::Look = art::Look { utf8: false, colors: art::Colors::None };
 
     #[test]
-    fn fits_an_80_column_terminal() {
+    fn fits_the_text_to_an_80_column_terminal() {
         for utf8 in [true, false] {
             let look = art::Look { utf8, colors: art::Colors::Rich };
-            for line in content("", "encryptor 9.9.9", 80, look) {
+            for line in content(TEXT, "9.9.9", 80, look) {
                 let shown = &visible(&line.text)[0];
                 assert!(shown.chars().count() <= 80, "{shown:?} is {} wide", shown.chars().count());
                 assert!(utf8 || shown.is_ascii());
             }
         }
+        assert!(plain().lines().all(|line| line.chars().count() <= 80), "{}", plain());
+        assert!(!plain().contains('\t') && !plain().contains("{version}"));
     }
 
     #[test]
-    fn shows_the_art_version_help_and_keys() {
-        let lines = content("USAGE:\n    encrypt FILE", "encryptor 9.9.9", 80, ASCII);
+    fn shows_the_art_text_and_keys() {
+        let lines = content(TEXT, "9.9.9", 80, ASCII);
         let screen = visible(&frame(&lines, 0, 30, 80));
         assert_eq!(screen.len(), 30, "one row for each line of the terminal");
         assert!(screen[2].contains("___ _ __   ___"), "{:?}", screen[2]);
-        assert!(screen.iter().any(|row| row.trim() == "encryptor 9.9.9"));
-        assert!(screen.iter().any(|row| row.trim() == "encrypt FILE"));
+        assert!(screen.iter().any(|row| row.trim() == "Welcome to Encryptor 9.9.9!"), "{screen:?}");
         assert!(screen[29].starts_with(" e encrypt   d decrypt   v view   q quit"));
-        assert!(!screen[29].contains("of"), "everything fits, so no position");
+        assert!(screen[29].contains("of"), "the text doesn't all fit, so where the view is");
 
         let utf8 = art::Look { utf8: true, ..ASCII };
-        let block = content("", "encryptor 9.9.9", 81, utf8);
+        let block = content("", "v", 81, utf8);
         assert!(visible(&block[3].text)[0].contains("██║   .'-'--'-'. ██████╔╝"), "the padlock in place of the O");
         assert!(visible(&content("", "v", 80, utf8)[2].text)[0].contains("___ _ __   ___"), "ASCII at 80 columns");
-        assert!(content("", "v", 40, ASCII)[0].text.contains('v'), "no art in a narrow window");
+        assert!(content("{version}", "v", 40, ASCII)[0].text.contains('v'), "no art in a narrow window");
+    }
+
+    #[test]
+    fn styles_the_title_headings_and_commands() {
+        let lines = layout("\tWelcome {version}!\n\tCommands:\n\t\tencrypt a.pdf  -->  encrypts it\nplain", "9.9.9", 80);
+        let styles: Vec<Style> = lines.iter().map(|line| line.style).collect();
+        assert_eq!(styles, [Style::Bold, Style::Bold, Style::Entry(21), Style::Plain]);
+        assert_eq!(lines[0].text, "    Welcome 9.9.9!", "a tab is 4 columns");
+        let drawn = frame(&content("\t\tencrypt a.pdf  -->  encrypts it", "v", 50, ASCII), 0, 3, 50);
+        assert!(drawn.contains("\x1b[1m          encrypt a.pdf\x1b[0m  -->  encrypts it"), "{drawn:?}");
+    }
+
+    #[test]
+    fn wraps_under_the_arrow_or_the_indent() {
+        let entry = wrap("    -q, --quiet  -->  doesn't print the encryption or decryption summary", 50);
+        assert_eq!(entry, [
+            "    -q, --quiet  -->  doesn't print the encryption",
+            "                      or decryption summary",
+        ]);
+        let prose = wrap("    We use chunking to handle files of any size, and folders in one go!", 40);
+        assert_eq!(prose, ["    We use chunking to handle files of", "    any size, and folders in one go!"]);
+        let deep = wrap("  -k, --key-file ~/PATH/example.pdf.key  -->  decrypts with its key", 50);
+        assert_eq!(deep[1], "      decrypts with its key", "past half the width, 4 in from the indent");
+        assert_eq!(wrap("", 80), [""]);
+        assert_eq!(wrap("    ==========", 6), ["    =========="], "a word too wide for any line");
     }
 
     #[test]
@@ -267,7 +392,7 @@ mod tests {
         let screen = visible(&frame(&lines, 10, 12, 30));
         assert_eq!(screen.len(), 12);
         assert!(screen.iter().all(|row| row.chars().count() <= 30), "{screen:?}");
-        assert_eq!(screen[0].trim(), "line 1");
+        assert_eq!(screen[0].trim(), "line 3", "7 rows of art and a blank, then the text");
         assert!(screen[11].starts_with(" e encrypt"), "{:?}", screen[11]);
         assert!(visible(&frame(&lines, 10, 12, 80))[11].ends_with(&format!("11-21 of {} ", lines.len())));
     }
