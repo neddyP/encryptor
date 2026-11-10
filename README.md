@@ -286,7 +286,7 @@ there before you press Enter. `q` on the home screen and Ctrl-C close it
 straight away. In scripts, with no terminal, everything is printed as usual.
 
 Run on its own, or with `--help`, `encryptor` shows a home screen: its name,
-shaded green to grey, then a welcome with the version and a guide to the
+shaded green to red, then a welcome with the version and a guide to the
 commands and options, from `src/home.txt`. Without a terminal, `--help`
 prints that guide. Press `e` to encrypt a file, `d` to decrypt one,
 `v` to view one, or `q` to quit; the arrow keys scroll if it doesn't all

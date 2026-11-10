@@ -2,7 +2,7 @@
 //! the top of every run's screen. In a UTF-8 terminal 81 columns wide or more,
 //! the name is in block letters with the padlock standing in for its O.
 //! Elsewhere, and in narrower windows, it's in ASCII beside the padlock, and in
-//! the narrowest it's left out. It shades from green to grey down the rows,
+//! the narrowest it's left out. It shades from green to red down the rows,
 //! padlock and all.
 
 /// The name's first seven letters in block letters, ENCRYPT.
@@ -38,10 +38,9 @@ const ASCII_LOCK: usize = 13;
 /// so the first column is left out, the same for every row.
 const LOCK_AS_O: usize = 10;
 
-/// Colours for the rows, top to bottom, from the 256-colour palette: bright
-/// green, losing its colour row by row down to grey, one for each of the
-/// art's 7 rows.
-const GRADIENT: [u8; 7] = [46, 40, 77, 71, 108, 102, 244];
+/// Colours for the rows, top to bottom, from the 256-colour palette: green,
+/// through yellow and orange, to red, one for each of the art's 7 rows.
+const GRADIENT: [u8; 7] = [46, 118, 190, 226, 214, 202, 196];
 
 /// A part of the art, coloured as one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -129,8 +128,8 @@ pub fn width(row: &Row) -> usize {
 pub fn paint(row: &Row, i: usize, count: usize, colors: Colors) -> String {
     let style = match colors {
         Colors::None => "1".to_string(),
-        // Too few colours to shade: green above, grey (white) below.
-        Colors::Basic => if i * 2 < count { "1;32" } else { "1;37" }.into(),
+        // Too few colours to shade: green above, red below.
+        Colors::Basic => if i * 2 < count { "1;32" } else { "1;31" }.into(),
         Colors::Rich => format!("1;38;5;{}", GRADIENT[i * (GRADIENT.len() - 1) / count.saturating_sub(1).max(1)]),
     };
     let text: String = row.iter().map(|(_, text)| text.as_str()).collect();
@@ -184,13 +183,13 @@ mod tests {
         let rows = rows(79, true);
         let second = paint(&rows[1], 1, rows.len(), Colors::Rich);
         let bottom = paint(&rows[6], 6, rows.len(), Colors::Rich);
-        assert!(second.starts_with("\x1b[1;38;5;40m███████╗") && second.contains("╗ / .--. \\  ██████╗"), "{second:?}");
+        assert!(second.starts_with("\x1b[1;38;5;118m███████╗") && second.contains("╗ / .--. \\  ██████╗"), "{second:?}");
         assert_eq!(second.matches("\x1b[").count(), 2, "one shade for the row, then the reset");
-        assert!(bottom.starts_with("\x1b[1;38;5;244m") && bottom.ends_with("\x1b[0m"), "{bottom:?}");
+        assert!(bottom.starts_with("\x1b[1;38;5;196m") && bottom.ends_with("\x1b[0m"), "{bottom:?}");
         assert!(paint(&rows[0], 0, rows.len(), Colors::Rich).starts_with("\x1b[1;38;5;46m"), "green at the top");
         let whole: String = rows[1].iter().map(|(_, text)| text.as_str()).collect();
         assert_eq!(paint(&rows[1], 1, rows.len(), Colors::None), format!("\x1b[1m{whole}\x1b[0m"), "bold only");
         assert!(paint(&rows[1], 1, rows.len(), Colors::Basic).starts_with("\x1b[1;32m"));
-        assert!(paint(&rows[6], 6, rows.len(), Colors::Basic).starts_with("\x1b[1;37m"));
+        assert!(paint(&rows[6], 6, rows.len(), Colors::Basic).starts_with("\x1b[1;31m"));
     }
 }
