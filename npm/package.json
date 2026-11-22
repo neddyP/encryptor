@@ -1,6 +1,6 @@
 {
   "name": "@neddyp/encryptor",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Encrypt and decrypt files with AES-256-GCM from the command line",
   "keywords": [
     "encryption",
