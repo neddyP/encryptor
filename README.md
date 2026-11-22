@@ -112,6 +112,14 @@ for you alone, and tells you how to add that folder to your `PATH` if it isn't
 there yet. The binary is statically linked, so it runs on any distribution
 and needs nothing else installed.
 
+Before anything is downloaded, it makes `~/.local/share/encryptor`, with
+`keys` and `filenames` in it, which only you can open (permissions 700).
+encryptor needs it: it keeps saved keys there, and the real names of files
+[given random names](#hiding-file-names). Run with sudo, it's made in your
+home folder, as you, not root's. If it can't be made, nothing is installed.
+encryptor itself also makes (or checks) it at the start of every run, so it's
+there however it was installed, npm included.
+
 The checksum catches a damaged or altered download, but it comes from the
 same release as the binary. To check the binary was built by this
 repository's release workflow from its source, with the
@@ -266,6 +274,7 @@ the questions in advance, so it isn't asked:
 | Option                | What it does                                                        |
 | --------------------- | ------------------------------------------------------------------- |
 | `-r`, `--recursive`   | Take in every file in the folders given and their subfolders; decrypt takes `.enc` files only |
+| `-n`, `--hide-names`  | Encrypt each file to a random name; decrypt gives it its real name back. See [Hiding file names](#hiding-file-names) |
 | `-k`, `--key-file KEY` | Use the key in `KEY`: 32 bytes, or 64 hex characters. It can be a pipe |
 | `--new-key PATH`      | Encrypt with a new key, saved to `PATH`, or into `PATH` if it's a folder |
 | `--keep`              | Encrypt, but keep the original instead of deleting it               |
@@ -347,7 +356,7 @@ share one, so given both, it asks for each in turn.
 
 #### Key groups: the `.encryptor` file
 
-`encrypt -r` leaves a `.encryptor` file in every folder it encrypts files in.
+`encrypt -r` (and `encrypt -n`) leaves a `.encryptor` file in every folder it encrypts files in.
 It lists that folder's `.enc` files in **key groups**, one per key or
 passphrase, each with a fingerprint of it:
 
@@ -405,9 +414,43 @@ A passphrase is made into each file's key with that file's own salt, so
 Argon2id runs once per file, about a second each on a recent desktop. For a
 folder of hundreds of files, a universal key is much faster.
 
-A passphrase is made into each file's key with that file's own salt, so
-Argon2id runs once per file, about a second each on a recent desktop. For a
-folder of hundreds of files, a universal key is much faster.
+### Hiding file names
+
+A `.enc` file's name says what's in it: `taxes-2024.pdf.enc`. With `-n` (or
+`--hide-names`), each file is encrypted to a name of 16 random bytes, as 32
+hex characters, instead:
+
+```
+$ encrypt -r -n ~/Documents/taxes
+...
+  Files          2 encrypted, 1.4 MiB in all
+                 taxes/2024.pdf → taxes/d3e341112a06da4248153a68011d73b1.enc
+                 taxes/receipts/may.jpg → taxes/receipts/84d8a3d3b06bc53865bccf986dcf7234.enc
+```
+
+Its real name is kept in two places, so losing one doesn't lose it:
+
+- **Its folder's [`.encryptor` file](#key-groups-the-encryptor-file),
+  encrypted** with AES-256-GCM under a key made from the file's own key or
+  passphrase. It travels with the folder, to another computer or a backup,
+  and only the key reveals it.
+- **`~/.local/share/encryptor/filenames/.<folder name>`**, in plain text,
+  readable only by you. It's on this computer only, and needs no key. Two
+  folders of the same name share one list, each under its own path, and as no
+  random name is ever repeated, a file is found even after its folder is moved
+  or renamed.
+
+The list is saved before anything is encrypted: if it can't be, nothing is,
+and the run says why. `-n` works for one file too, and its `.encryptor` file
+is made for it.
+
+`decrypt` and `view` give each file its real name back by themselves, from
+the `.encryptor` file once its key or passphrase is given, or else from the
+list. With neither, the file is decrypted under its random name, and you're
+told so. Folder names aren't hidden, only file names.
+
+Earlier versions of encryptor decrypt these files too, under their random
+names.
 
 ### Encrypting
 
@@ -473,7 +516,8 @@ The prompts go in this order:
    save and print questions are then skipped.
 3. **Save the key as a file?** `y` saves it as a 32-byte binary file, and
    asks where: `y` to the next question puts it in
-   `~/.local/share/encryptor/keys`, or `$XDG_DATA_HOME/encryptor/keys`, named
+   `~/.local/share/encryptor/keys` (made on every run if it's missing, and
+   `XDG_DATA_HOME` doesn't move it), named
    `<file>.key` (with a number added if that's taken). Only you can open
    that folder, and it's away from your files, so copying, backing up or
    syncing their folder doesn't take the key with them. `n` asks you to type
@@ -850,6 +894,20 @@ written as `%XX`.
 | ----------- | ----------- |
 | `key F` | `F` is 32 bytes of HKDF-SHA256, no salt, of the key, info `encryptor key fingerprint`, in hex |
 | `passphrase argon2id M P L S F` | Argon2id (version 19, `M` KiB, `P` passes, `L` lanes) of the passphrase with the 32-byte salt `S`, 32 bytes long, then HKDF-SHA256 of that as for a key, info `encryptor passphrase fingerprint` |
+
+A file given a random name has its real name after its name on the same line,
+after a tab: a 12-byte random nonce, the name encrypted with AES-256-GCM, and
+the 16-byte tag, in hex. The name's key is HKDF-SHA256, no salt, of the key,
+info `encryptor name key`, or of the passphrase's Argon2id output as above,
+info `encryptor passphrase name key`. The `.enc` file's name is the associated
+data, so a name can't be moved to another file.
+
+### The filenames list
+
+`~/.local/share/encryptor/filenames/.<folder name>`, plain text like
+`.encryptor`: `encryptor-filenames 1`, then each folder's full path on a line
+of its own, followed by its files, indented two spaces, each the random name,
+a tab and the real name, escaped the same way.
 
 ### Earlier formats
 

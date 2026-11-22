@@ -17,7 +17,7 @@ use crate::explain::{self, Action};
 use crate::term::{self, safe_path};
 use crate::{protect, wipe};
 
-const ENC_EXT: &str = "enc";
+pub const ENC_EXT: &str = "enc";
 
 /// The size of the file `command` was given, if it's a regular file, or an
 /// explanation of why it can't be used.

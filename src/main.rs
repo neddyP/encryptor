@@ -21,6 +21,7 @@ mod keys;
 mod legacy;
 mod manifest;
 mod meta;
+mod names;
 mod pager;
 mod progress;
 mod protect;
@@ -76,6 +77,8 @@ each. --key-file and --new-key give one key for them all.
 OPTIONS:
     -r, --recursive       take in every file in the folders given, and in
                           their subfolders; decrypt takes .enc files only
+    -n, --hide-names      encrypt each file to a random name (16 random
+                          bytes); decrypt gives it its real name back
     -k, --key-file KEY    use the key in KEY: 32 bytes, or 64 hex characters.
                           KEY can be a pipe, as in <(pass show keys/report)
         --new-key PATH    encrypt with a new key, saved to PATH, or into PATH
@@ -164,6 +167,11 @@ fn run(args: &[String]) -> Result<()> {
         },
         command => command,
     };
+    // The keys and filenames folders are needed on every run, so they're made
+    // (or checked) now, before anything else is done. Help and version,
+    // above, don't need them.
+    keys::open_folder()?;
+    names::open_folder()?;
     let options = &invocation.options;
     cli::check(command, options)?;
     let files = &invocation.files;

@@ -331,40 +331,49 @@ pub fn enter_passphrase(give_up: &str) -> Result<Zeroizing<String>> {
     Err(Error::KeyOrData(give_up.into()))
 }
 
-/// Where generated keys are saved: `$XDG_DATA_HOME/encryptor/keys`, or
-/// `~/.local/share/encryptor/keys`. It's away from the encrypted files, so
+/// Where generated keys are saved: always `~/.local/share/encryptor/keys`,
+/// whatever `XDG_DATA_HOME` says. It's away from the encrypted files, so
 /// a copy of their folder, a backup or a synced folder doesn't carry the keys
 /// with it, and only the user can open it.
 pub fn folder() -> Option<PathBuf> {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
-    Some(data.join("encryptor/keys"))
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".local/share/encryptor/keys"))
 }
 
 /// The keys folder, made if it isn't there yet, and checked to be a folder of
-/// the user's own that only they can open.
-fn open_folder() -> Result<PathBuf> {
+/// the user's own that only they can open. Every run needs it, so this is
+/// called at startup.
+pub fn open_folder() -> Result<PathBuf> {
     let dir = folder().ok_or_else(|| Error::File(explain::NO_KEYS_FOLDER.into()))?;
-    let create_error = |e: io::Error| Error::File(explain::file(Action::Create, &dir, &e));
-    if let Some(parent) = dir.parent() {
-        fs::create_dir_all(parent).map_err(create_error)?;
-    }
-    match DirBuilder::new().mode(0o700).create(&dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(create_error(e)),
-    }
-    let meta = fs::symlink_metadata(&dir).map_err(create_error)?;
-    // SAFETY: geteuid has no arguments and can't fail.
-    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
-        return Err(Error::File(explain::keys_folder_not_own(&dir)));
-    }
-    if meta.mode() & 0o077 != 0 {
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(create_error)?;
-    }
+    private_folder(&dir)?;
     Ok(dir)
+}
+
+/// Makes `dir`, a folder in `~/.local/share/encryptor`, if it isn't there
+/// yet, with `~/.local/share/encryptor` itself, both only the user can open,
+/// and checks they're folders of the user's own.
+pub fn private_folder(dir: &Path) -> Result<()> {
+    let create_error = |e: io::Error| Error::File(explain::file(Action::Create, dir, &e));
+    let parent = files::parent_dir(dir);
+    if let Some(data) = parent.parent() {
+        fs::create_dir_all(data).map_err(create_error)?;
+    }
+    for dir in [parent.as_path(), dir] {
+        match DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(create_error(e)),
+        }
+        let meta = fs::symlink_metadata(dir).map_err(create_error)?;
+        // SAFETY: geteuid has no arguments and can't fail.
+        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::File(explain::keys_folder_not_own(dir)));
+        }
+        if meta.mode() & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(create_error)?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether the key file at `key` is in the same folder as `input`, where the

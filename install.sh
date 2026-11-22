@@ -49,6 +49,25 @@
     fi
   fi
 
+  # encryptor keeps its keys and the real names of files it gives random
+  # names in ~/.local/share/encryptor, which only you can open. It needs it,
+  # so it's made first, and nothing is installed if it can't be. Run with
+  # sudo, it's made in your home folder, as you, not root's.
+  as_user=
+  home=$HOME
+  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    case $SUDO_USER in
+      *[!A-Za-z0-9._-]*) die "SUDO_USER isn't a user name: $SUDO_USER" ;;
+    esac
+    eval "home=~$SUDO_USER"
+    as_user="sudo -u $SUDO_USER"
+  fi
+  data=$home/.local/share/encryptor
+  { $as_user mkdir -p "$home/.local/share" &&
+    $as_user mkdir -p -m 700 "$data" "$data/keys" "$data/filenames" &&
+    $as_user chmod 700 "$data" "$data/keys" "$data/filenames"; } 2>/dev/null ||
+    die "couldn't make $data (with keys and filenames in it), which encryptor needs. Check you own it, then try again"
+
   # Over HTTPS only: curl and GNU wget refuse to follow a redirect to plain
   # HTTP. BusyBox's wget can't be told to, but the checksum still is checked.
   download() {

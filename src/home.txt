@@ -23,6 +23,7 @@
 	Command Flags:
 
 		-r, --recursive  -->  recursive encryption/decryption for whole directories
+		-n, --hide-names  -->  gives each .enc file a random name; decrypt restores the real one
 		-V, --version  -->  shows program version
 		-h, --help  -->  shows this screen
 		-q, --quiet  -->  doesn't print the encryption/decryption summary

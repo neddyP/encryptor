@@ -14,16 +14,19 @@ use crate::keys::{self, KeySource, Printed, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{confirm, safe_path};
-use crate::{KEY_LEN, MAGIC, desktop, history, kdf, manifest, protect, session, stream, wipe};
+use crate::{KEY_LEN, MAGIC, desktop, history, kdf, manifest, names, protect, session, stream, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     command_path(files::file_path("encrypt", file)?, options, false)
 }
 
 /// The encrypt command for one file, `input`. With `record`, as for a folder
-/// given with -r, it's listed in its folder's .encryptor file.
+/// given with -r, or with --hide-names, it's listed in its folder's
+/// .encryptor file.
 pub fn command_path(input: PathBuf, options: &Options, record: bool) -> Result<()> {
-    let (original, output) = check(&input, options)?;
+    let record = record || options.hide_names;
+    let output = output_for(&input, options)?;
+    let original = check(&input, &output, options)?;
     session::remember(format!("File to encrypt: {}", safe_path(&input)));
     if let Some(new_key) = &options.new_key {
         keys::check_new_key(new_key)?;
@@ -43,11 +46,18 @@ pub fn command_path(input: PathBuf, options: &Options, record: bool) -> Result<(
         return Ok(());
     }
     let started = Instant::now();
+    // A random name's real name is saved before anything is encrypted, so
+    // it's never lost.
+    let real = input.file_name().unwrap_or_default().to_os_string();
+    if options.hide_names {
+        names::save_or_stop(&[(output.clone(), real.clone())])?;
+    }
     // Made before sealing, as a passphrase's takes a moment of its own.
-    let fingerprint = if record { Some(manifest::Fingerprint::of_secret(&secret)?) } else { None };
+    let group = if record { Some(manifest::GroupKey::of_secret(&secret)?) } else { None };
     let sealed = seal(&input, &output, original, &secret, &mut key_file, options.keep)?;
     drop(secret);
-    let recorded = fingerprint.map(|fingerprint| manifest::record(&[(output.clone(), fingerprint)]));
+    let hidden = options.hide_names.then_some(real.as_os_str());
+    let recorded = group.map(|group| manifest::record_one(&output, &group, hidden));
     if options.quiet {
         recorded.iter().flat_map(|recorded| recorded.warnings()).for_each(|w| eprintln!("warning: {w}"));
     }
@@ -82,6 +92,9 @@ pub fn command_path(input: PathBuf, options: &Options, record: bool) -> Result<(
     if let Some(recorded) = &recorded {
         rows.push(("Key groups", recorded.row()));
     }
+    if options.hide_names {
+        rows.push(("Name", names::REPORT_ROW.into()));
+    }
     if let Some(thumbnails) = sealed.thumbnails {
         rows.push(("Thumbnails", thumbnails_status(thumbnails)));
     }
@@ -94,19 +107,24 @@ pub fn command_path(input: PathBuf, options: &Options, record: bool) -> Result<(
     report::show("ENCRYPTION SUCCESSFUL", &rows, "encryption-summary", ask)
 }
 
-/// Checks `input` can be encrypted to `<input>.enc`, before any key is made,
+/// Checks `input` can be encrypted to `output`, before any key is made,
 /// since problems found now save asking for a key that can't be used. Unless
 /// it's to be kept, the original is opened to be overwritten too, which fails
-/// now if that couldn't be done later. Returns it open, with the output's path.
-pub fn check(input: &Path, options: &Options) -> Result<(wipe::Original, PathBuf)> {
+/// now if that couldn't be done later. Returns it open.
+pub fn check(input: &Path, output: &Path, options: &Options) -> Result<wipe::Original> {
     files::input_len("encrypt", input)?;
-    let output = files::encrypted_path(input);
     if output.exists() {
-        return Err(Error::File(explain::output_exists(&output)));
+        return Err(Error::File(explain::output_exists(output)));
     }
     let original = wipe::Original::open(input, !options.keep)?;
-    files::check_writable(&output)?;
-    Ok((original, output))
+    files::check_writable(output)?;
+    Ok(original)
+}
+
+/// Where `input` is encrypted to: `<input>.enc`, or with --hide-names, a
+/// random name beside it.
+pub fn output_for(input: &Path, options: &Options) -> Result<PathBuf> {
+    if options.hide_names { names::random_name(input) } else { Ok(files::encrypted_path(input)) }
 }
 
 /// Warns that `input`, and `others` more files, are on a copy-on-write

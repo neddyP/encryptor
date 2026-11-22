@@ -20,7 +20,7 @@ use crate::keys::{self, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{self, choose, confirm, safe_path};
-use crate::{encrypt, history, pager, protect, recording, session, stream};
+use crate::{encrypt, history, manifest, names, pager, protect, recording, session, stream};
 
 /// Locked memory needed beyond the file itself: the stack, the chunk being
 /// decrypted, the screen being drawn, the key and the answers typed.
@@ -30,8 +30,11 @@ const LOCK_MARGIN: u64 = 1 << 20;
 struct Viewed {
     /// The encrypted file it came from, which the new one replaces.
     input: PathBuf,
-    /// Its name decrypted, which a new key file is named after.
+    /// Its name decrypted, which a new key file is named after: its real
+    /// name, if it was given a random one.
     plain_name: PathBuf,
+    /// Its real name, if it was given a random one and it was found.
+    real: Option<std::ffi::OsString>,
     contents: Zeroizing<Vec<u8>>,
     metadata: Option<Metadata>,
     /// How it was shown, for the report.
@@ -76,9 +79,17 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
     protect::check_locked()?;
     session::remember(format!("File to view: {}", safe_path(&input)));
     let name = PathBuf::from(input.file_name().unwrap_or_default());
-    let plain_name = files::decrypted_path(&name);
+    // A file with a random name is shown under its real name, found in the
+    // list of names, or with its key, in its folder's .encryptor file.
+    let mut namer = names::Namer::default();
+    let mut plain_name = namer.real_name(&input).map_or_else(|| files::decrypted_path(&name), PathBuf::from);
 
     let unlocked = decrypt::key(options, "encryptor view", &plain_name, &encrypted)?;
+    namer.unlock(&input, unlocked.names())?;
+    let real = namer.real_name(&input);
+    if let Some(real) = &real {
+        plain_name = PathBuf::from(real);
+    }
     // Looked for before the file is decrypted, as looking can start other
     // programs, so none is started while the plaintext is in memory.
     let recorders = recording::scan();
@@ -95,7 +106,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         eprintln!("Not shown; nothing was written.");
         return Ok(());
     }
-    pager::show(&contents, &safe_path(&name))?;
+    pager::show(&contents, &safe_path(if real.is_some() { &plain_name } else { &name }))?;
     let shown = match &captured_by {
         Some(by) => {
             eprintln!("The file was shown, then erased from the screen, but {by} captured it.");
@@ -137,7 +148,7 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
         (None, false) => "The old key".into(),
     };
     drop(unlocked);
-    reencrypt(Viewed { input, plain_name, contents, metadata, shown }, &old, options)
+    reencrypt(Viewed { input, plain_name, real, contents, metadata, shown }, &old, options)
 }
 
 /// Decrypts the whole file into locked memory, which is wiped when it's
@@ -207,6 +218,19 @@ fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
     }
     let replaced = out.finish()?;
     new_key_file.keep();
+    // Listed in its folder's .encryptor file, it moves to its new key's
+    // group, with its real name sealed again under that key.
+    let regrouped = match manifest::lists(input) {
+        false => None,
+        true => Some(match manifest::GroupKey::of_secret(&secret) {
+            Ok(group) => manifest::record_one(input, &group, viewed.real.as_deref()),
+            Err(e) => manifest::Recorded::failed(format!("{} wasn't updated: {e}", manifest::NAME)),
+        }),
+    };
+    drop(secret);
+    for warning in regrouped.iter().flat_map(|regrouped| regrouped.warnings()) {
+        eprintln!("warning: {warning}");
+    }
 
     eprintln!("Encrypted again with the new key: {}", safe_path(input));
     eprintln!("{old} no longer opens it.");
@@ -234,6 +258,11 @@ fn reencrypt(viewed: Viewed, old: &str, options: &Options) -> Result<()> {
             ),
         ),
         ("Metadata", stored),
+    ]);
+    if let Some(regrouped) = &regrouped {
+        rows.push(("Key groups", regrouped.row()));
+    }
+    rows.extend([
         ("Integrity", "verified: re-read from disk, decrypted, SHA-256 matches what was viewed".into()),
         ("Key and data", protect::memory_status().into()),
         ("Shell history", history),

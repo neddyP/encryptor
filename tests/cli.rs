@@ -165,6 +165,34 @@ fn saves_a_new_key_into_a_folder() {
 }
 
 #[test]
+fn makes_the_keys_folder_on_every_run_whatever_xdg_says() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("keys-folder-startup");
+    dir.write("notes.txt", b"notes");
+    // XDG_DATA_HOME is set elsewhere; the folder still goes under HOME.
+    let elsewhere = dir.path("elsewhere");
+    let mut child = launcher(BIN.as_ref())
+        .args(["encrypt", "notes.txt", "--new-key", "notes.key", "--yes", "--quiet"])
+        .current_dir(&dir.0)
+        .env("HOME", &dir.0)
+        .env("XDG_DATA_HOME", &elsewhere)
+        .env_remove("HISTFILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let run = Run(child.wait_with_output().unwrap());
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    // Made even though the key was saved somewhere else.
+    assert!(dir.path(".local/share/encryptor/keys").is_dir());
+    assert!(!elsewhere.exists());
+}
+
+#[test]
 fn refuses_to_save_a_new_key_over_another_file() {
     if !runnable() {
         return;
@@ -491,7 +519,9 @@ fn encrypts_with_a_passphrase() {
     assert!(run.stdout().contains("from your passphrase with Argon2id"), "{}", run.stdout());
     let file = dir.read("note.txt.enc");
     assert_eq!(&file[..5], b"AGCM\x04", "a passphrase's file is format 4");
-    assert!(!dir.exists(".local/share/encryptor/keys"), "nothing to save for a passphrase");
+    // The keys folder is made on every run, but a passphrase leaves nothing in it.
+    let saved = fs::read_dir(dir.path(".local/share/encryptor/keys")).unwrap().count();
+    assert_eq!(saved, 0, "nothing to save for a passphrase");
     // Removed from history exactly as typed, and not in other capitals.
     assert_eq!(dir.read(".bash_history"), format!("ls\nECHO '{}'\n", phrase.to_uppercase()).as_bytes());
 
@@ -744,6 +774,63 @@ fn lists_key_groups_so_decrypt_r_asks_once_for_each() {
     let run = dir.run(&["decrypt", "-r", "docs", "-k", "k1.key", "-y", "--overwrite"], "k2.key\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(run.stderr().matches("Key group").count(), 1, "{}", run.stderr());
+}
+
+#[test]
+fn hides_names_and_gives_them_back_from_either_record() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("hide-names");
+    fs::create_dir_all(dir.path("docs/sub")).unwrap();
+    dir.write("docs/taxes 2024.pdf", b"one");
+    dir.write("docs/sub/b.txt", b"two");
+    let run = dir.run(&["encrypt", "-r", "-n", "docs", "--new-key", "k.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("named with 16 random bytes"), "{}", run.stdout());
+
+    // Only random names, 32 hex characters, and the .encryptor file are left.
+    let names = |folder: &str| -> Vec<String> {
+        let mut names: Vec<String> =
+            fs::read_dir(dir.path(folder)).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        names
+    };
+    let top = names("docs");
+    assert_eq!(top.len(), 3, "{top:?}");
+    let random = top.iter().find(|name| name.ends_with(".enc")).unwrap().clone();
+    assert!(random.len() == 36 && random[..32].bytes().all(|b| b.is_ascii_hexdigit()), "{random}");
+    // The real name isn't in the folder in the clear, but is in the private list.
+    let manifest = String::from_utf8(dir.read("docs/.encryptor")).unwrap();
+    assert!(!manifest.contains("taxes"), "{manifest}");
+    let list = ".local/share/encryptor/filenames/.docs";
+    assert!(String::from_utf8(dir.read(list)).unwrap().contains(&format!("{random}\ttaxes 2024.pdf")));
+
+    let decrypt = |dir: &Scratch| {
+        let run = dir.run(&["decrypt", "-r", "docs", "-k", "k.key", "-y", "-q", "--overwrite"], "");
+        assert_eq!(run.code(), 0, "{}", run.stderr());
+        run
+    };
+    decrypt(&dir);
+    assert_eq!(dir.read("docs/taxes 2024.pdf"), b"one");
+    assert_eq!(dir.read("docs/sub/b.txt"), b"two");
+
+    // Without the list, as on another computer, the key opens the name in
+    // .encryptor.
+    fs::remove_file(dir.path("docs/taxes 2024.pdf")).unwrap();
+    fs::remove_dir_all(dir.path(".local/share/encryptor/filenames")).unwrap();
+    decrypt(&dir);
+    assert_eq!(dir.read("docs/taxes 2024.pdf"), b"one");
+
+    // Without either, it keeps its random name, and says so.
+    fs::remove_file(dir.path("docs/taxes 2024.pdf")).unwrap();
+    fs::remove_file(dir.path("docs/.encryptor")).unwrap();
+    let run = decrypt(&dir);
+    assert!(run.stderr().contains("keeps the random name"), "{}", run.stderr());
+    assert!(dir.exists(&format!("docs/{}", &random[..32])));
+
+    let run = dir.run(&["decrypt", "-n", "docs/sub"], "");
+    assert_eq!(run.code(), 2, "{}", run.stderr());
 }
 
 #[test]

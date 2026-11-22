@@ -17,7 +17,7 @@ use crate::keys::{self, SecretKey};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{confirm, safe, safe_path};
-use crate::{KEY_LEN, MAGIC, VERSION, history, kdf, legacy, protect, stream, wipe};
+use crate::{KEY_LEN, MAGIC, VERSION, history, kdf, legacy, names, protect, stream, wipe};
 
 /// An encrypted file, open and checked, with its start already read.
 pub struct Encrypted {
@@ -37,6 +37,20 @@ pub struct Unlocked {
     pub key_file: Option<PathBuf>,
     pub passphrase: bool,
     pub history: String,
+    /// The passphrase entered, for a passphrase's file: it may also unlock
+    /// the file's real name.
+    pub entered: Option<Zeroizing<String>>,
+}
+
+impl Unlocked {
+    /// What may unlock the real name of the file this opens.
+    pub fn names(&self) -> names::Unlock<'_> {
+        match &self.entered {
+            Some(passphrase) => names::Unlock::Passphrase(passphrase.as_bytes()),
+            None if self.passphrase => names::Unlock::Nothing,
+            None => names::Unlock::Key(&self.key),
+        }
+    }
 }
 
 /// Opens the file `command` was given, rejecting files this tool didn't
@@ -82,7 +96,7 @@ pub fn key(options: &Options, run_again: &str, plain: &Path, encrypted: &Encrypt
         let passphrase = keys::enter_passphrase(&give_up)?;
         let history = history::clean(history::Secret::Passphrase(passphrase.as_bytes()));
         let key = kdf::key_for(passphrase.as_bytes(), &encrypted.start)?;
-        return Ok(Unlocked { key, key_file: None, passphrase: true, history });
+        return Ok(Unlocked { key, key_file: None, passphrase: true, history, entered: Some(passphrase) });
     }
     let (key, key_file) = match &options.key_file {
         Some(path) => (keys::read_key_file(path)?, Some(path.clone())),
@@ -97,7 +111,7 @@ pub fn key(options: &Options, run_again: &str, plain: &Path, encrypted: &Encrypt
         }
     };
     let history = history::clean(history::Secret::Key(&key));
-    Ok(Unlocked { key, key_file, passphrase: false, history })
+    Ok(Unlocked { key, key_file, passphrase: false, history, entered: None })
 }
 
 /// A failure decrypting `input` into `output` in chunks, explained for a
@@ -179,8 +193,11 @@ pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
 /// The decrypt command for one file, `input`.
 pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
     let encrypted = open("decrypt", &input)?;
-    let output = options.output.clone().unwrap_or_else(|| files::decrypted_path(&input));
-    let replace = check_output(&input, &output)?;
+    // A file with a random name is given its real name: from the list of
+    // names now, or once its key is in, from its folder's .encryptor file.
+    let mut namer = names::Namer::default();
+    let mut output = options.output.clone().unwrap_or_else(|| namer.output(&input));
+    let mut replace = check_output(&input, &output)?;
     // Replacing a file is never agreed to through a pipe: a script says so
     // with --overwrite, and otherwise finds out before giving a key.
     let interactive = io::stdin().is_terminal();
@@ -189,6 +206,18 @@ pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
     }
 
     let unlocked = key(options, "decrypt", &output, &encrypted)?;
+    if options.output.is_none() {
+        namer.unlock(&input, unlocked.names())?;
+        let named = namer.output(&input);
+        if named != output {
+            output = named;
+            replace = check_output(&input, &output)?;
+            if replace && !options.overwrite && !interactive {
+                return Err(Error::Usage(explain::needs_overwrite(&output)));
+            }
+        }
+        namer.note_if_unnamed(&input);
+    }
 
     if !options.yes && !confirm("Decrypt using AES-256-GCM?")? {
         eprintln!("Cancelled; nothing was decrypted.");

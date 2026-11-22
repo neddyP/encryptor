@@ -26,6 +26,9 @@ pub struct Options {
     pub quiet: bool,
     /// Take in every file in the folders given, and in their subfolders.
     pub recursive: bool,
+    /// Name each .enc file with 16 random bytes, keeping the real name in
+    /// its folder's .encryptor file and in the filenames folder.
+    pub hide_names: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -84,7 +87,7 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
             "--new-key" => options.new_key = Some(path()?),
             "-o" | "--output" => options.output = Some(path()?),
             "-h" | "--help" | "-V" | "--version" | "-v" | "--view" | "--keep" | "--overwrite" | "-y" | "--yes"
-            | "-q" | "--quiet" | "-r" | "--recursive"
+            | "-q" | "--quiet" | "-r" | "--recursive" | "-n" | "--hide-names"
                 if inline.is_some() =>
             {
                 return Err(Error::Usage(format!("{name} doesn't take a value")));
@@ -97,6 +100,7 @@ pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
             "-y" | "--yes" => options.yes = true,
             "-q" | "--quiet" => options.quiet = true,
             "-r" | "--recursive" => options.recursive = true,
+            "-n" | "--hide-names" => options.hide_names = true,
             _ => return Err(Error::Usage(explain::unknown_command(name, usage))),
         }
     }
@@ -164,7 +168,8 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
         || options.overwrite
         || options.yes
         || options.quiet
-        || options.recursive;
+        || options.recursive
+        || options.hide_names;
     match command {
         Command::Update if any => {
             Err(Error::Usage("update doesn't take options. Run it on its own: encryptor update".into()))
@@ -172,6 +177,9 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
         Command::Encrypt if options.output.is_some() => only("--output", "decrypt"),
         Command::Encrypt if options.overwrite => only("--overwrite", "decrypt"),
         Command::Decrypt if options.new_key.is_some() => only("--new-key", "encrypt"),
+        Command::Decrypt if options.hide_names => Err(Error::Usage(
+            "--hide-names only applies to encrypt: decrypt gives files their real names back by itself".into(),
+        )),
         Command::Decrypt if options.keep => {
             Err(Error::Usage("--keep only applies to encrypt: decrypt always keeps the encrypted file".into()))
         }
@@ -181,7 +189,8 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
                 || options.keep
                 || options.overwrite
                 || options.yes
-                || options.recursive =>
+                || options.recursive
+                || options.hide_names =>
         {
             Err(Error::Usage("view only takes --key-file and --quiet; it asks everything else at the keyboard".into()))
         }
@@ -271,6 +280,12 @@ mod tests {
         assert!(run.command == Command::Decrypt && run.options.recursive);
         assert_eq!(run.files, ["docs", "more"]);
         assert!(parsed(&["encrypt", "--recursive", "docs"]).unwrap().options.recursive);
+        assert!(parsed(&["encrypt", "-n", "a"]).unwrap().options.hide_names);
+        assert!(parsed(&["encrypt", "-r", "--hide-names", "docs"]).unwrap().options.hide_names);
+        let hide = Options { hide_names: true, ..Options::default() };
+        assert!(check(Command::Encrypt, &hide).is_ok());
+        assert!(matches!(check(Command::Decrypt, &hide), Err(Error::Usage(_))));
+        assert!(matches!(check(Command::View, &hide), Err(Error::Usage(_))));
         let recursive = Options { recursive: true, ..Options::default() };
         assert!(check(Command::Encrypt, &recursive).is_ok() && check(Command::Decrypt, &recursive).is_ok());
         assert!(matches!(check(Command::Update, &recursive), Err(Error::Usage(_))));

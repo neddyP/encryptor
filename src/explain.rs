@@ -333,14 +333,14 @@ Before it's shown:
     this tool can't wipe.";
 
 /// HOME isn't set, so there's no keys folder.
-pub const NO_KEYS_FOLDER: &str = "HOME isn't set, so there's no keys folder to save the key in.\nGive one with \
-     --new-key PATH, or set HOME and try again.";
+pub const NO_KEYS_FOLDER: &str = "HOME isn't set, so the keys folder (~/.local/share/encryptor/keys), which \
+     this tool needs, can't be found.\nSet HOME and try again.";
 
 /// The keys folder exists but isn't a folder of the user's own.
 pub fn keys_folder_not_own(dir: &Path) -> String {
     format!(
-        "{} isn't a folder of your own, so the key wasn't saved there.\nMove it aside and try again, or give \
-         another place with --new-key PATH.",
+        "{} isn't a folder of your own, and this tool needs it for keys and file names.\nMove it aside and try \
+         again.",
         safe_path(dir)
     )
 }
