@@ -2,13 +2,16 @@
 //! with -r every file in the folders given and in their subfolders. Each file
 //! is encrypted to its own .enc file beside it, with one universal key for
 //! them all, named after their folder, or a separate key for each, and is
-//! decrypted back the same way. decrypt -r takes one universal key only.
+//! decrypted back the same way. encrypt -r lists each file in its folder's
+//! .encryptor file, in a group for its key (see manifest.rs), and decrypt -r
+//! asks for each group's key once. Without those lists, decrypt -r takes one
+//! universal key.
 //!
 //! Every file is checked before a key is asked for, so a problem with any of
 //! them stops the run before anything is done. Then they're done in turn, and
 //! the first that fails stops the rest, which are left as they were.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::os::unix::fs::MetadataExt;
@@ -25,7 +28,7 @@ use crate::keys::{self, Kind, KeySource, Printed, Recipe, Secret, SecretKey, Unu
 use crate::report::{self, fmt_size};
 use crate::term::{self, choose_coded, confirm, home_path, safe, safe_path};
 use crate::progress::Overall;
-use crate::{encrypt, files, history, kdf, protect, session, stream};
+use crate::{encrypt, files, history, kdf, manifest, protect, session, stream};
 
 /// Files named one by one in the report, before the rest are counted.
 const LISTED: usize = 20;
@@ -58,7 +61,7 @@ pub fn encrypt(args: &[String], options: &Options) -> Result<()> {
         0 => return Err(Error::File(nothing_found("encrypt", &found))),
         1 => {
             note_left_out(&found);
-            return encrypt::command_path(found.files[0].clone(), options);
+            return encrypt::command_path(found.files[0].clone(), options, options.recursive);
         }
         _ => {}
     }
@@ -113,6 +116,13 @@ pub fn encrypt(args: &[String], options: &Options) -> Result<()> {
     }
 
     let started = Instant::now();
+    // With -r, each file is listed in its folder's .encryptor file under its
+    // key's fingerprint. A universal key's is made once, here.
+    let record = options.recursive;
+    let universal_fingerprint = match &plan {
+        Plan::Universal(secret, _) if record => Some(manifest::Fingerprint::of_secret(secret)?),
+        _ => None,
+    };
     let mut done: Vec<Sealed> = Vec::new();
     // At a terminal, one bar for the whole batch. With separate keys, each
     // file's key is made or asked for under its name, with the bar put away;
@@ -125,8 +135,11 @@ pub fn encrypt(args: &[String], options: &Options) -> Result<()> {
             overall.pause();
             eprintln!("\n[{}/{count}] {}", i + 1, safe_path(input));
         }
-        match seal(input, i == 0, &plan, &mut universal_file, &overall, options) {
-            Ok(sealed) => {
+        match seal(input, i == 0, &plan, &mut universal_file, &overall, options, record) {
+            Ok(mut sealed) => {
+                if sealed.fingerprint.is_none() {
+                    sealed.fingerprint = universal_fingerprint.clone();
+                }
                 if !overall.active() {
                     eprintln!("  encrypted to {}", safe_path(&sealed.output));
                 }
@@ -137,11 +150,21 @@ pub fn encrypt(args: &[String], options: &Options) -> Result<()> {
             Err(e) => {
                 overall.pause();
                 stopped("encrypted", input, done.len(), count);
+                // Those done are listed, so their key groups aren't lost.
+                if record {
+                    for warning in record_groups(&done).warnings() {
+                        eprintln!("warning: {warning}");
+                    }
+                }
                 return Err(e);
             }
         }
     }
     drop(overall);
+    let recorded = record.then(|| record_groups(&done));
+    if options.quiet {
+        recorded.iter().flat_map(|recorded| recorded.warnings()).for_each(|w| eprintln!("warning: {w}"));
+    }
     let key_rows = batch_key_rows(&plan, &done, count);
     let history_row = match &plan {
         Plan::Separate(Each::Generate(_)) => "nothing to remove: each key was made by this run".into(),
@@ -176,6 +199,9 @@ pub fn encrypt(args: &[String], options: &Options) -> Result<()> {
     rows.push(("Metadata", "stored encrypted in each file".into()));
     rows.push(("Integrity", "each verified: re-read from disk, decrypted, SHA-256 matches its original".into()));
     rows.extend(originals(&done));
+    if let Some(recorded) = &recorded {
+        rows.push(("Key groups", recorded.row()));
+    }
     let thumbnails: Vec<usize> = done.iter().filter_map(|sealed| sealed.sealed.thumbnails).collect();
     if !thumbnails.is_empty() {
         rows.push(("Thumbnails", encrypt::thumbnails_status(thumbnails.iter().sum())));
@@ -243,10 +269,13 @@ struct Sealed {
     source: Option<KeySource>,
     /// What cleaning shell history of its own key or passphrase did.
     history: Option<String>,
+    /// Its key's fingerprint, for its folder's .encryptor file.
+    fingerprint: Option<manifest::Fingerprint>,
 }
 
 /// Encrypts one file of a batch, checking it again first, as it may have
-/// changed since. With separate keys, its key is made or asked for now.
+/// changed since. With separate keys, its key is made or asked for now, and
+/// with `record`, its fingerprint made.
 fn seal(
     input: &Path,
     first: bool,
@@ -254,11 +283,12 @@ fn seal(
     universal_file: &mut UnusedKeyFile,
     overall: &Overall,
     options: &Options,
+    record: bool,
 ) -> Result<Sealed> {
     let (original, output) = encrypt::check(input, options)?;
-    let (sealed, source, history) = match plan {
+    let (sealed, source, history, fingerprint) = match plan {
         Plan::Universal(secret, _) => {
-            (encrypt::seal(input, &output, original, secret, universal_file, options.keep)?, None, None)
+            (encrypt::seal(input, &output, original, secret, universal_file, options.keep)?, None, None, None)
         }
         Plan::Separate(each) => {
             let mut own_file = UnusedKeyFile::default();
@@ -273,12 +303,22 @@ fn seal(
             };
             // A key just generated can't be in shell history.
             let history = (!matches!(each, Each::Generate(_))).then(|| history::clean(secret.held()));
+            let fingerprint = if record { Some(manifest::Fingerprint::of_secret(&secret)?) } else { None };
             overall.resume();
             let sealed = encrypt::seal(input, &output, original, &secret, &mut own_file, options.keep)?;
-            (sealed, Some(source), history)
+            (sealed, Some(source), history, fingerprint)
         }
     };
-    Ok(Sealed { input: input.to_path_buf(), output, sealed, source, history })
+    Ok(Sealed { input: input.to_path_buf(), output, sealed, source, history, fingerprint })
+}
+
+/// Lists the files done in their folders' .encryptor files.
+fn record_groups(done: &[Sealed]) -> manifest::Recorded {
+    let encrypted: Vec<_> = done
+        .iter()
+        .filter_map(|sealed| sealed.fingerprint.clone().map(|fingerprint| (sealed.output.clone(), fingerprint)))
+        .collect();
+    manifest::record(&encrypted)
 }
 
 /// The report's rows on the batch's keys and where they're kept.
@@ -343,6 +383,7 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
     // encrypted with is noted.
     let mut problems = Vec::new();
     let mut passphrases = 0;
+    let mut is_passphrase = Vec::with_capacity(count);
     let mut existing = Vec::new();
     let mut total = 0;
     for input in &found.files {
@@ -354,6 +395,7 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
             Ok((version, len, replace)) => {
                 total += len;
                 passphrases += usize::from(version == stream::PASSPHRASE_VERSION);
+                is_passphrase.push(version == stream::PASSPHRASE_VERSION);
                 if replace {
                     existing.push(output);
                 }
@@ -374,49 +416,19 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
         return Err(Error::Usage(explain::needs_overwrite(first)));
     }
 
-    let keys_used = count - passphrases;
-    let mixed = passphrases > 0 && keys_used > 0;
-    let scope = if options.recursive || options.key_file.is_some() {
-        if mixed {
-            return Err(Error::Usage(explain::mixed_kinds(passphrases, keys_used, options.recursive)));
-        }
-        Scope::Universal
-    } else if mixed {
-        eprintln!("{passphrases} of the files use a passphrase and {keys_used} a key, so each is asked for in turn.");
-        Scope::Separate
-    } else if passphrases == count {
-        choose_scope(&format!("Were all {count} files encrypted with one passphrase, or each with a separate one?"))?
-    } else {
-        choose_scope(&format!("Were all {count} files encrypted with one universal key, or each with a separate key?"))?
-    };
-
     let mut history_status = Vec::new();
-    let opener = match scope {
-        Scope::Separate => None,
-        Scope::Universal if passphrases == count => {
-            if options.key_file.is_some() {
-                return Err(Error::Usage(explain::PASSPHRASE_NOT_KEY.into()));
-            }
-            let passphrase = keys::enter_passphrase(
-                "no passphrase entered.\nRun decrypt again, and enter the passphrase the files were encrypted with.",
-            )?;
-            history_status.push(history::clean(history::Secret::Passphrase(passphrase.as_bytes())));
-            Some(Opener::Passphrase(passphrase))
+    // With -r, the folders' .encryptor files say which files share a key, so
+    // each group's key is asked for once, and checked before it's used.
+    let groups = if options.recursive { Groups::find(&found.files, &is_passphrase) } else { None };
+    let (openers, chosen, grouped_row) = match groups {
+        Some(groups) => {
+            let (openers, chosen, row) = groups.ask(&found.files, &is_passphrase, options, &mut history_status)?;
+            (openers, chosen, Some(row))
         }
-        Scope::Universal => {
-            let (key, key_file) = match &options.key_file {
-                Some(path) => (keys::read_key_file(path)?, Some(path.clone())),
-                None => keys::prompt(
-                    false,
-                    &format!(
-                        "no valid key after 3 attempts.\nRun decrypt again with the files' key: the 64 characters \
-                         printed when they were encrypted, or its key file, usually {}.key.",
-                        safe(&found.name)
-                    ),
-                )?,
-            };
-            history_status.push(history::clean(history::Secret::Key(&key)));
-            Some(Opener::Key(key, key_file))
+        None => {
+            let opener = universal_opener(&found, passphrases, options, &mut history_status)?;
+            let chosen = vec![opener.as_ref().map(|_| 0); count];
+            (opener.into_iter().collect::<Vec<_>>(), chosen, None)
         }
     };
 
@@ -444,12 +456,13 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
     // key or passphrase is asked for.
     let overall = Overall::start(count, total);
     for (i, input) in found.files.iter().enumerate() {
+        let opener = chosen[i].map(|j| &openers[j]);
         overall.next(input);
         if opener.is_none() || !overall.active() {
             overall.pause();
             eprintln!("\n[{}/{count}] {}", i + 1, safe_path(input));
         }
-        match unseal(input, opener.as_ref(), &overall, options, overwrite) {
+        match unseal(input, opener, &overall, options, overwrite) {
             Ok(opened) => {
                 if !overall.active() {
                     eprintln!("  decrypted to {}", safe_path(&opened.output));
@@ -471,17 +484,20 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
         return Ok(());
     }
 
-    let key = match &opener {
-        Some(Opener::Key(_, Some(path))) => {
+    let key = match (grouped_row, openers.first()) {
+        (Some(row), _) => row,
+        (None, Some(Opener::Key(_, Some(path)))) => {
             format!("256-bit, from {}, one universal key for all {count} files", safe_path(path))
         }
-        Some(Opener::Key(_, None)) => format!("256-bit, entered by you, one universal key for all {count} files"),
-        Some(Opener::Passphrase(_)) => {
+        (None, Some(Opener::Key(_, None))) => {
+            format!("256-bit, entered by you, one universal key for all {count} files")
+        }
+        (None, Some(Opener::Passphrase(_))) => {
             format!("{}, one passphrase for all {count} files", decrypt::key_row(&done[0].start, true))
         }
-        None => "256-bit, a separate key or passphrase for each file".into(),
+        (None, None) => "256-bit, a separate key or passphrase for each file".into(),
     };
-    drop(opener);
+    drop(openers);
     let total: u64 = done.iter().map(|opened| opened.opened.len).sum();
     let mut rows = vec![
         ("Cipher", "AES-256-GCM (authenticated encryption)".to_string()),
@@ -507,11 +523,250 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
     report::show("DECRYPTION SUCCESSFUL", &rows, "decryption-summary", interactive && !options.yes)
 }
 
+/// What decrypts a batch without key groups: with -r or --key-file, one
+/// universal key or passphrase; otherwise that, or each file's asked for in
+/// turn (`None`), as the user says.
+fn universal_opener(
+    found: &Found,
+    passphrases: usize,
+    options: &Options,
+    history_status: &mut Vec<String>,
+) -> Result<Option<Opener>> {
+    let count = found.files.len();
+    let keys_used = count - passphrases;
+    let mixed = passphrases > 0 && keys_used > 0;
+    let scope = if options.recursive || options.key_file.is_some() {
+        if mixed {
+            return Err(Error::Usage(explain::mixed_kinds(passphrases, keys_used, options.recursive)));
+        }
+        Scope::Universal
+    } else if mixed {
+        eprintln!("{passphrases} of the files use a passphrase and {keys_used} a key, so each is asked for in turn.");
+        Scope::Separate
+    } else if passphrases == count {
+        choose_scope(&format!("Were all {count} files encrypted with one passphrase, or each with a separate one?"))?
+    } else {
+        choose_scope(&format!("Were all {count} files encrypted with one universal key, or each with a separate key?"))?
+    };
+
+    Ok(match scope {
+        Scope::Separate => None,
+        Scope::Universal if passphrases == count => {
+            if options.key_file.is_some() {
+                return Err(Error::Usage(explain::PASSPHRASE_NOT_KEY.into()));
+            }
+            let passphrase = keys::enter_passphrase(
+                "no passphrase entered.\nRun decrypt again, and enter the passphrase the files were encrypted with.",
+            )?;
+            history_status.push(history::clean(history::Secret::Passphrase(passphrase.as_bytes())));
+            Some(Opener::Passphrase(passphrase))
+        }
+        Scope::Universal => {
+            let (key, key_file) = match &options.key_file {
+                Some(path) => (keys::read_key_file(path)?, Some(path.clone())),
+                None => keys::prompt(
+                    false,
+                    &format!(
+                        "no valid key after 3 attempts.\nRun decrypt again with the files' key: the 64 characters \
+                         printed when they were encrypted, or its key file, usually {}.key.",
+                        safe(&found.name)
+                    ),
+                )?,
+            };
+            history_status.push(history::clean(history::Secret::Key(&key)));
+            Some(Opener::Key(key, key_file))
+        }
+    })
+}
+
 /// What a batch is decrypted with, when it's one for all the files.
 enum Opener {
     Key(SecretKey, Option<PathBuf>),
     /// Made into each file's key with the settings and salt in its header.
     Passphrase(Zeroizing<String>),
+}
+
+/// The key groups the folders' .encryptor files put a batch's files in. A
+/// key used in several folders is one group.
+struct Groups {
+    fingerprints: Vec<manifest::Fingerprint>,
+    /// Each file's group, if its folder's .encryptor file lists it under a
+    /// key of the kind the file needs.
+    of_file: Vec<Option<usize>>,
+}
+
+impl Groups {
+    /// The groups of `paths`, whose files need a passphrase where
+    /// `is_passphrase` says so, or `None` if no .encryptor file lists any.
+    fn find(paths: &[PathBuf], is_passphrase: &[bool]) -> Option<Self> {
+        let mut loaded: HashMap<PathBuf, manifest::Loaded> = HashMap::new();
+        let mut fingerprints: Vec<manifest::Fingerprint> = Vec::new();
+        let mut of_file = Vec::with_capacity(paths.len());
+        for (path, &passphrase) in paths.iter().zip(is_passphrase) {
+            let list = loaded.entry(files::folder(path).to_path_buf()).or_insert_with_key(|dir| {
+                let list = manifest::load(dir);
+                if let manifest::Loaded::Unusable(why) = &list {
+                    eprintln!("note: {why}, so it's not used.");
+                }
+                list
+            });
+            let fingerprint = match list {
+                manifest::Loaded::Read(list) => path.file_name().and_then(|name| list.group_of(name)),
+                _ => None,
+            };
+            // Listed under the wrong kind, it's out of date: not used.
+            let group = fingerprint.filter(|fingerprint| fingerprint.is_passphrase() == passphrase).map(|fingerprint| {
+                fingerprints.iter().position(|known| known == fingerprint).unwrap_or_else(|| {
+                    fingerprints.push(fingerprint.clone());
+                    fingerprints.len() - 1
+                })
+            });
+            of_file.push(group);
+        }
+        of_file.iter().any(Option::is_some).then_some(Self { fingerprints, of_file })
+    }
+
+    /// Asks for each group's key or passphrase once, checking it against the
+    /// group's fingerprint, then for one for the files in no group, of each
+    /// kind. `--key-file` answers for every group its key matches. Returns
+    /// them with the one each file uses, and the report's key row.
+    fn ask(
+        &self,
+        paths: &[PathBuf],
+        is_passphrase: &[bool],
+        options: &Options,
+        history_status: &mut Vec<String>,
+    ) -> Result<(Vec<Opener>, Vec<Option<usize>>, String)> {
+        let total = self.fingerprints.len();
+        let listed = self.of_file.iter().flatten().count();
+        let groups = if total == 1 { "1 key group".into() } else { format!("{total} key groups") };
+        eprintln!(
+            "The folders' {} files put {listed} of the {} files in {groups}. Each group's key is asked for once, and \
+             checked against its fingerprint before it's used.",
+            manifest::NAME,
+            paths.len()
+        );
+        let given = match &options.key_file {
+            Some(path) => {
+                let key = keys::read_key_file(path)?;
+                history_status.push(history::clean(history::Secret::Key(&key)));
+                Some((key, path.clone()))
+            }
+            None => None,
+        };
+        let unlisted = |passphrase: bool| -> Vec<usize> {
+            (0..paths.len()).filter(|&i| self.of_file[i].is_none() && is_passphrase[i] == passphrase).collect()
+        };
+        let (unlisted_keys, unlisted_passphrases) = (unlisted(false), unlisted(true));
+        if let Some((key, path)) = &given
+            && unlisted_keys.is_empty()
+            && !self.fingerprints.iter().any(|fingerprint| fingerprint.matches_key(key))
+        {
+            eprintln!("note: the key in {} isn't any group's, so each group's is asked for.", safe_path(path));
+        }
+
+        let mut openers = Vec::new();
+        let mut chosen = vec![None; paths.len()];
+        for (g, fingerprint) in self.fingerprints.iter().enumerate() {
+            let members: Vec<usize> = (0..paths.len()).filter(|&i| self.of_file[i] == Some(g)).collect();
+            let opener = match &given {
+                Some((key, path)) if fingerprint.matches_key(key) => Opener::Key(keys::copy(key), Some(path.clone())),
+                _ => {
+                    eprintln!("\nKey group {} of {total}: {}", g + 1, members_of(&members, paths));
+                    group_secret(fingerprint, history_status)?
+                }
+            };
+            for i in members {
+                chosen[i] = Some(openers.len());
+            }
+            openers.push(opener);
+        }
+
+        // Files no .encryptor file lists are opened as before: one key for
+        // them all, and one passphrase, unchecked until they're decrypted.
+        if !unlisted_keys.is_empty() {
+            let (key, key_file) = match &given {
+                Some((key, path)) => (keys::copy(key), Some(path.clone())),
+                None => {
+                    eprintln!("\nIn no key group, encrypted with a key: {}", members_of(&unlisted_keys, paths));
+                    let (key, key_file) = keys::prompt(
+                        false,
+                        "no valid key after 3 attempts.\nRun decrypt -r again with the key of the files in no key \
+                         group.",
+                    )?;
+                    history_status.push(history::clean(history::Secret::Key(&key)));
+                    (key, key_file)
+                }
+            };
+            for &i in &unlisted_keys {
+                chosen[i] = Some(openers.len());
+            }
+            openers.push(Opener::Key(key, key_file));
+        }
+        if !unlisted_passphrases.is_empty() {
+            eprintln!("\nIn no key group, encrypted with a passphrase: {}", members_of(&unlisted_passphrases, paths));
+            let passphrase = keys::enter_passphrase(
+                "no passphrase entered.\nRun decrypt -r again, and enter the passphrase of the files in no key group.",
+            )?;
+            history_status.push(history::clean(history::Secret::Passphrase(passphrase.as_bytes())));
+            for &i in &unlisted_passphrases {
+                chosen[i] = Some(openers.len());
+            }
+            openers.push(Opener::Passphrase(passphrase));
+        }
+
+        let mut row = format!(
+            "256-bit, {groups} from the folders' {} files, each checked against its fingerprint",
+            manifest::NAME
+        );
+        let rest = unlisted_keys.len() + unlisted_passphrases.len();
+        if rest > 0 {
+            row.push_str(&format!("; {rest} of the files in no group"));
+        }
+        Ok((openers, chosen, row))
+    }
+}
+
+/// A group's files for its question: how many, and the first.
+fn members_of(members: &[usize], paths: &[PathBuf]) -> String {
+    let first = members.first().map(|&i| safe_path(&paths[i])).unwrap_or_default();
+    match members.len() {
+        1 => format!("1 file, {first}"),
+        n => format!("{n} files, such as {first}"),
+    }
+}
+
+/// Asks for a group's key or passphrase, up to 3 times, until one matches
+/// its fingerprint.
+fn group_secret(fingerprint: &manifest::Fingerprint, history_status: &mut Vec<String>) -> Result<Opener> {
+    for _ in 0..3 {
+        if fingerprint.is_passphrase() {
+            let passphrase = keys::enter_passphrase(
+                "no passphrase entered.\nRun decrypt -r again, and enter the group's passphrase.",
+            )?;
+            history_status.push(history::clean(history::Secret::Passphrase(passphrase.as_bytes())));
+            if fingerprint.matches_passphrase(passphrase.as_bytes())? {
+                return Ok(Opener::Passphrase(passphrase));
+            }
+            eprintln!("  That isn't this group's passphrase: it doesn't match the group's fingerprint.");
+        } else {
+            let (key, key_file) = keys::prompt(
+                false,
+                "no valid key after 3 attempts.\nRun decrypt -r again with the group's key: the 64 characters \
+                 printed when its files were encrypted, or its key file.",
+            )?;
+            history_status.push(history::clean(history::Secret::Key(&key)));
+            if fingerprint.matches_key(&key) {
+                return Ok(Opener::Key(key, key_file));
+            }
+            eprintln!("  That isn't this group's key: it doesn't match the group's fingerprint.");
+        }
+    }
+    Err(Error::KeyOrData(format!(
+        "nothing entered matched the group's fingerprint after 3 attempts, so nothing was decrypted.\nRun decrypt -r \
+         again with that group's key or passphrase. Its files are listed in their folder's {} file.",
+        manifest::NAME
+    )))
 }
 
 /// One file of a batch, decrypted.
@@ -671,6 +926,10 @@ impl Walk {
                 }
             } else if !kind.is_file() {
                 self.left_out.special += 1;
+            } else if path.file_name().is_some_and(|name| name == manifest::NAME) {
+                // A folder's key group list: never encrypted, and read
+                // rather than decrypted.
+                self.left_out.manifests += usize::from(self.encrypting);
             } else if self.encrypting && encrypted {
                 self.left_out.encrypted += 1;
             } else if !self.encrypting && !encrypted {
@@ -694,6 +953,8 @@ struct LeftOut {
     plain: usize,
     keys_folder: bool,
     key_file: bool,
+    /// .encryptor files, when encrypting.
+    manifests: usize,
 }
 
 impl LeftOut {
@@ -718,6 +979,9 @@ impl LeftOut {
         }
         if self.key_file {
             notes.push("the key file in use".into());
+        }
+        if self.manifests > 0 {
+            notes.push(format!("{}, the lists of key groups", files(self.manifests).replace("file", ".encryptor file")));
         }
         notes
     }

@@ -697,6 +697,56 @@ fn encrypts_a_folder_with_a_universal_key_named_after_it() {
 }
 
 #[test]
+fn lists_key_groups_so_decrypt_r_asks_once_for_each() {
+    if !runnable() {
+        return;
+    }
+    let dir = Scratch::new("key-groups");
+    fs::create_dir_all(dir.path("docs/sub")).unwrap();
+    dir.write("docs/a.txt", b"one");
+    dir.write("docs/sub/b.txt", b"two");
+    let run = dir.run(&["encrypt", "-r", "docs", "--new-key", "k1.key", "-y", "-q"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    // A second run, with another key, adds a group beside the first, and
+    // leaves the lists themselves out.
+    dir.write("docs/c.txt", b"three");
+    dir.write("docs/sub/d.txt", b"four");
+    let run = dir.run(&["encrypt", "-r", "docs", "--new-key", "k2.key", "-y"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().contains("2 .encryptor files, the lists of key groups"), "{}", run.stdout());
+    assert!(!dir.exists("docs/.encryptor.enc"));
+
+    let list = String::from_utf8(dir.read("docs/.encryptor")).unwrap();
+    assert!(list.contains("\n  a.txt.enc\n") && list.contains("\n  c.txt.enc\n"), "{list}");
+    assert_eq!(list.matches("\nkey ").count(), 2, "{list}");
+    // Never the key itself, as hex or raw.
+    for key in ["k1.key", "k2.key"] {
+        let key = dir.read(key);
+        assert!(!list.contains(&hex::encode(&key)), "{list}");
+    }
+    assert!(dir.exists("docs/sub/.encryptor"));
+
+    for name in ["docs/a.txt", "docs/c.txt", "docs/sub/b.txt", "docs/sub/d.txt"] {
+        assert!(!dir.exists(name), "{name}");
+    }
+    // The first group is a.txt's and b.txt's: the wrong key is turned away
+    // before anything is decrypted, then each group's is asked for once.
+    let run = dir.run(&["decrypt", "-r", "docs", "-y"], "k2.key\nk1.key\nk2.key\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stderr().contains("in 2 key groups"), "{}", run.stderr());
+    assert_eq!(run.stderr().matches("isn't this group's key").count(), 1, "{}", run.stderr());
+    assert_eq!(dir.read("docs/a.txt"), b"one");
+    assert_eq!(dir.read("docs/sub/b.txt"), b"two");
+    assert_eq!(dir.read("docs/c.txt"), b"three");
+    assert_eq!(dir.read("docs/sub/d.txt"), b"four");
+
+    // --key-file answers for its own group; the other is asked for.
+    let run = dir.run(&["decrypt", "-r", "docs", "-k", "k1.key", "-y", "--overwrite"], "k2.key\n");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(run.stderr().matches("Key group").count(), 1, "{}", run.stderr());
+}
+
+#[test]
 fn gives_each_file_a_key_of_its_own() {
     if !runnable() {
         return;

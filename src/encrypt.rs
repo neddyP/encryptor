@@ -14,14 +14,15 @@ use crate::keys::{self, KeySource, Printed, UnusedKeyFile};
 use crate::meta::Metadata;
 use crate::report::{self, fmt_size};
 use crate::term::{confirm, safe_path};
-use crate::{KEY_LEN, MAGIC, desktop, history, kdf, protect, session, stream, wipe};
+use crate::{KEY_LEN, MAGIC, desktop, history, kdf, manifest, protect, session, stream, wipe};
 
 pub fn command(file: Option<&str>, options: &Options) -> Result<()> {
-    command_path(files::file_path("encrypt", file)?, options)
+    command_path(files::file_path("encrypt", file)?, options, false)
 }
 
-/// The encrypt command for one file, `input`.
-pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
+/// The encrypt command for one file, `input`. With `record`, as for a folder
+/// given with -r, it's listed in its folder's .encryptor file.
+pub fn command_path(input: PathBuf, options: &Options, record: bool) -> Result<()> {
     let (original, output) = check(&input, options)?;
     session::remember(format!("File to encrypt: {}", safe_path(&input)));
     if let Some(new_key) = &options.new_key {
@@ -42,8 +43,14 @@ pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
         return Ok(());
     }
     let started = Instant::now();
+    // Made before sealing, as a passphrase's takes a moment of its own.
+    let fingerprint = if record { Some(manifest::Fingerprint::of_secret(&secret)?) } else { None };
     let sealed = seal(&input, &output, original, &secret, &mut key_file, options.keep)?;
     drop(secret);
+    let recorded = fingerprint.map(|fingerprint| manifest::record(&[(output.clone(), fingerprint)]));
+    if options.quiet {
+        recorded.iter().flat_map(|recorded| recorded.warnings()).for_each(|w| eprintln!("warning: {w}"));
+    }
     let elapsed = started.elapsed();
     if options.quiet {
         return Ok(());
@@ -72,6 +79,9 @@ pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
         ("Integrity", "verified: re-read from disk, decrypted, SHA-256 matches original".into()),
         ("Original", sealed.original),
     ]);
+    if let Some(recorded) = &recorded {
+        rows.push(("Key groups", recorded.row()));
+    }
     if let Some(thumbnails) = sealed.thumbnails {
         rows.push(("Thumbnails", thumbnails_status(thumbnails)));
     }

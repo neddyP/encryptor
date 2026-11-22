@@ -242,7 +242,7 @@ encrypt FILE... [OPTIONS]      encrypt each FILE to FILE.enc, then delete it
 encrypt -r FOLDER [OPTIONS]    encrypt every file in FOLDER and its subfolders
 decrypt FILE.enc... [OPTIONS]  decrypt each FILE.enc back to FILE
 decrypt -r FOLDER [OPTIONS]    decrypt every .enc file in FOLDER and its
-                               subfolders, all with one key
+                               subfolders, one key per key group
 encryptor view FILE.enc        show FILE.enc decrypted on screen, then
                                erase it and encrypt it again
 encryptor                      show the home screen
@@ -343,9 +343,67 @@ The report says what was left out.
 `decrypt` with several files asks the same `[u/s]` question: answer `u` to
 give one key or passphrase for all of them, or `s` to give each file's in
 turn. Files encrypted with a passphrase and files encrypted with a key can't
-share one, so given both, it asks for each in turn. `decrypt -r` only takes
-one universal key or passphrase for every `.enc` file in the folder, and
-refuses a folder holding both kinds.
+share one, so given both, it asks for each in turn.
+
+#### Key groups: the `.encryptor` file
+
+`encrypt -r` leaves a `.encryptor` file in every folder it encrypts files in.
+It lists that folder's `.enc` files in **key groups**, one per key or
+passphrase, each with a fingerprint of it:
+
+```
+encryptor-manifest 1
+
+key fd6941a6f2f4fb67e217ccb346abe12e8625e8e6f98dabf5bc7c939c415b0db6
+  2023.pdf.enc
+  2024.pdf.enc
+
+passphrase argon2id 262144 3 1 5fc16a9d…07777dc 5437f16c…7636d8
+  notes.txt.enc
+```
+
+Groups build up over runs: encrypt more files into the folder later with
+another key and they get a group of their own beside the first. A key used in
+several folders is one group to `decrypt -r`, which reads every folder's list
+and asks for each group's key or passphrase **once**, checking it against the
+fingerprint before decrypting anything:
+
+```
+$ decrypt -r ~/Documents/taxes
+The folders' .encryptor files put 14 of the 14 files in 2 key groups. Each group's key is asked for once, and checked against its fingerprint before it's used.
+
+Key group 1 of 2: 10 files, such as taxes/2023.pdf.enc
+Enter the key (64 hex characters) or the path to its key file:
+
+Key group 2 of 2: 4 files, such as taxes/receipts/may.jpg.enc
+Enter the passphrase:
+```
+
+A wrong key or passphrase is turned away there, up to 3 times. `--key-file`
+answers for every group its key matches; the rest are asked for. Files no
+list mentions get one key, and one passphrase, for all of them, as before.
+With no `.encryptor` files at all, `decrypt -r` takes one universal key or
+passphrase for every `.enc` file in the folder, and refuses a folder holding
+both kinds.
+
+What it does and doesn't give away:
+
+- **No key or passphrase is in it.** A key's fingerprint is HKDF-SHA256 of
+  it, which can't be turned back into a random 256-bit key. A passphrase's is
+  made slowly, with Argon2id (256 MiB) and a salt of its own, so guessing at
+  it is no faster than guessing at the files. That takes an extra half second
+  per passphrase group when encrypting.
+- **It's plain text**, readable only by you (permissions 600). Anyone who can
+  read it learns which files share a key and how many keys there are; the
+  `.enc` names already show the files' names.
+- **It's never encrypted**, and is left out of `encrypt -r`. Delete it and
+  `decrypt -r` works as it did before it existed. A file listed under the
+  wrong kind, or missing, is simply not used, and a file encrypted again
+  moves to its new key's group.
+
+A passphrase is made into each file's key with that file's own salt, so
+Argon2id runs once per file, about a second each on a recent desktop. For a
+folder of hundreds of files, a universal key is much faster.
 
 A passphrase is made into each file's key with that file's own salt, so
 Argon2id runs once per file, about a second each on a recent desktop. For a
@@ -779,6 +837,19 @@ plaintext = b"".join(
 length = int.from_bytes(plaintext[:4], "little")  # skip the metadata
 contents = plaintext[4 + length:]
 ```
+
+### The `.encryptor` file
+
+Plain text, lines ending in `\n`. Lines that are empty or start with `#` are
+ignored. The first other line is `encryptor-manifest 1`. Then each group is
+a header line followed by its files, each indented two spaces and named
+without its folder, with `%`, control characters and bytes that aren't UTF-8
+written as `%XX`.
+
+| Header line | Fingerprint |
+| ----------- | ----------- |
+| `key F` | `F` is 32 bytes of HKDF-SHA256, no salt, of the key, info `encryptor key fingerprint`, in hex |
+| `passphrase argon2id M P L S F` | Argon2id (version 19, `M` KiB, `P` passes, `L` lanes) of the passphrase with the 32-byte salt `S`, 32 bytes long, then HKDF-SHA256 of that as for a key, info `encryptor passphrase fingerprint` |
 
 ### Earlier formats
 

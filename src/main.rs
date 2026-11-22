@@ -19,6 +19,7 @@ mod home;
 mod kdf;
 mod keys;
 mod legacy;
+mod manifest;
 mod meta;
 mod pager;
 mod progress;
@@ -60,7 +61,7 @@ USAGE:
     encrypt -r FOLDER [OPTIONS]    encrypt every file in FOLDER and its subfolders
     decrypt FILE.enc... [OPTIONS]  decrypt each FILE.enc back to FILE
     decrypt -r FOLDER [OPTIONS]    decrypt every .enc file in FOLDER and its
-                                   subfolders, all with one key
+                                   subfolders, one key per key group
     encryptor view FILE.enc        show FILE.enc decrypted on screen, erase
                                    it, then keep its key or change it
     encryptor                      show the home screen
