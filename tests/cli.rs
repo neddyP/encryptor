@@ -38,6 +38,27 @@ impl Scratch {
         self.path(name).exists()
     }
 
+    /// Copies the file or folder `from` to `to`, replacing what's there, as
+    /// decrypt shreds the .enc files it decrypts and tests decrypt again.
+    fn copy(&self, from: &str, to: &str) {
+        fn copy(from: &std::path::Path, to: &std::path::Path) {
+            if from.is_dir() {
+                fs::create_dir_all(to).unwrap();
+                for entry in fs::read_dir(from).unwrap() {
+                    let entry = entry.unwrap();
+                    copy(&entry.path(), &to.join(entry.file_name()));
+                }
+            } else {
+                fs::copy(from, to).unwrap();
+            }
+        }
+        let to = self.path(to);
+        if to.is_dir() {
+            fs::remove_dir_all(&to).unwrap();
+        }
+        copy(&self.path(from), &to);
+    }
+
     fn run(&self, args: &[&str], stdin: &str) -> Run {
         self.run_as(BIN.as_ref(), args, stdin)
     }
@@ -267,11 +288,15 @@ fn reads_keys_as_hex_text_and_from_a_pipe() {
     let hex: String = dir.read("a.key").iter().map(|b| format!("{b:02x}")).collect();
     dir.write("a.hex", format!("{hex}\n").as_bytes());
 
+    dir.copy("a.txt.enc", "a.txt.enc.copy");
     let run = dir.run(&["decrypt", "a.txt.enc", "--key-file", "a.hex", "-y", "-q"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(dir.read("a.txt"), b"contents of a");
+    // Decrypted and verified, the encrypted file is shredded.
+    assert!(!dir.exists("a.txt.enc"));
 
     fs::remove_file(dir.path("a.txt")).unwrap();
+    fs::rename(dir.path("a.txt.enc.copy"), dir.path("a.txt.enc")).unwrap();
     let run = dir.run(&["decrypt", "a.txt.enc", "--key-file", "/dev/stdin", "-y", "-q"], &format!("{hex}\n"));
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(dir.read("a.txt"), b"contents of a");
@@ -638,10 +663,12 @@ fn warns_of_a_folder_key_kept_among_its_files() {
     let decrypt_with = |key: &str| {
         let run = dir.run(&["decrypt", "-r", "docs", "-k", key, "-y", "-q"], "");
         assert_eq!(run.code(), 0, "{}", run.stderr());
-        // decrypt keeps the .enc files; clear them so the next encrypt can run.
-        for name in [key, "docs/a.txt.enc", "docs/sub/b.txt.enc"] {
-            fs::remove_file(dir.path(name)).unwrap();
+        // decrypt shreds the .enc files, and their .encryptor files go with
+        // the last of them.
+        for name in ["docs/a.txt.enc", "docs/sub/b.txt.enc", "docs/.encryptor"] {
+            assert!(!dir.exists(name), "{name}");
         }
+        fs::remove_file(dir.path(key)).unwrap();
     };
 
     // Saved inside the folder when asked where: warned, and not encrypted.
@@ -761,6 +788,7 @@ fn lists_key_groups_so_decrypt_r_asks_once_for_each() {
     }
     // The first group is a.txt's and b.txt's: the wrong key is turned away
     // before anything is decrypted, then each group's is asked for once.
+    dir.copy("docs", "docs.copy");
     let run = dir.run(&["decrypt", "-r", "docs", "-y"], "k2.key\nk1.key\nk2.key\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stderr().contains("in 2 key groups"), "{}", run.stderr());
@@ -770,7 +798,11 @@ fn lists_key_groups_so_decrypt_r_asks_once_for_each() {
     assert_eq!(dir.read("docs/c.txt"), b"three");
     assert_eq!(dir.read("docs/sub/d.txt"), b"four");
 
+    // The .enc files and the lists of them are gone.
+    assert!(!dir.exists("docs/a.txt.enc") && !dir.exists("docs/.encryptor"));
+
     // --key-file answers for its own group; the other is asked for.
+    dir.copy("docs.copy", "docs");
     let run = dir.run(&["decrypt", "-r", "docs", "-k", "k1.key", "-y", "--overwrite"], "k2.key\n");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(run.stderr().matches("Key group").count(), 1, "{}", run.stderr());
@@ -806,24 +838,39 @@ fn hides_names_and_gives_them_back_from_either_record() {
     let list = ".local/share/encryptor/filenames/.docs";
     assert!(String::from_utf8(dir.read(list)).unwrap().contains(&format!("{random}\ttaxes 2024.pdf")));
 
+    // Each case starts again from the encrypted folder, as decrypting shreds
+    // the .enc files and takes them out of both records.
+    let lists = ".local/share/encryptor/filenames";
+    dir.copy("docs", "docs.copy");
+    dir.copy(lists, "lists.copy");
     let decrypt = |dir: &Scratch| {
-        let run = dir.run(&["decrypt", "-r", "docs", "-k", "k.key", "-y", "-q", "--overwrite"], "");
+        let run = dir.run(&["decrypt", "-r", "docs", "-k", "k.key", "-y", "-q"], "");
         assert_eq!(run.code(), 0, "{}", run.stderr());
         run
     };
     decrypt(&dir);
     assert_eq!(dir.read("docs/taxes 2024.pdf"), b"one");
     assert_eq!(dir.read("docs/sub/b.txt"), b"two");
+    assert_eq!(names("docs"), ["sub", "taxes 2024.pdf"]);
+    assert!(!dir.exists(list));
 
     // Without the list, as on another computer, the key opens the name in
     // .encryptor.
-    fs::remove_file(dir.path("docs/taxes 2024.pdf")).unwrap();
-    fs::remove_dir_all(dir.path(".local/share/encryptor/filenames")).unwrap();
+    dir.copy("docs.copy", "docs");
+    fs::remove_dir_all(dir.path(lists)).unwrap();
+    decrypt(&dir);
+    assert_eq!(dir.read("docs/taxes 2024.pdf"), b"one");
+
+    // Without .encryptor, the list has it.
+    dir.copy("docs.copy", "docs");
+    dir.copy("lists.copy", lists);
+    fs::remove_file(dir.path("docs/.encryptor")).unwrap();
     decrypt(&dir);
     assert_eq!(dir.read("docs/taxes 2024.pdf"), b"one");
 
     // Without either, it keeps its random name, and says so.
-    fs::remove_file(dir.path("docs/taxes 2024.pdf")).unwrap();
+    dir.copy("docs.copy", "docs");
+    fs::remove_dir_all(dir.path(lists)).unwrap();
     fs::remove_file(dir.path("docs/.encryptor")).unwrap();
     let run = decrypt(&dir);
     assert!(run.stderr().contains("keeps the random name"), "{}", run.stderr());
@@ -849,12 +896,16 @@ fn gives_each_file_a_key_of_its_own() {
     assert!(dir.exists(&format!("{keys}/a.txt.key")) && dir.exists(&format!("{keys}/b.txt.key")));
     assert!(run.stdout().contains("a separate one for each file"), "{}", run.stdout());
 
-    // One key can't open both.
+    // One key can't open both. The one it opened is shredded; the other is
+    // left as it was.
+    dir.copy("a.txt.enc", "a.txt.enc.copy");
     let run = dir.run(&["decrypt", "a.txt.enc", "b.txt.enc", "-k", &format!("{keys}/a.txt.key"), "-y"], "");
     assert_eq!(run.code(), 3, "{}", run.stderr());
     assert!(run.stderr().contains("Stopped at b.txt.enc: 1 of the 2 files were decrypted"), "{}", run.stderr());
     assert_eq!(dir.read("a.txt"), b"a");
+    assert!(!dir.exists("a.txt.enc") && dir.exists("b.txt.enc"));
     fs::remove_file(dir.path("a.txt")).unwrap();
+    fs::rename(dir.path("a.txt.enc.copy"), dir.path("a.txt.enc")).unwrap();
 
     // Separate, then each file's key in turn.
     let answers = format!("s\ny\n{keys}/a.txt.key\n{keys}/b.txt.key\n");

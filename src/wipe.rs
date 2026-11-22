@@ -139,6 +139,42 @@ pub fn rewrite(file: &File, old_len: u64, contents: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// What became of an encrypted file once it's decrypted and the decrypted
+/// file verified: overwritten with zeros, renamed to random characters, then
+/// deleted. With other names (hard links), they'd be left as zeros, so only
+/// this name is removed. Returns whether it's gone, and what happened, for
+/// the report. It never fails the run, as the decrypted file is safe by now.
+pub fn remove_encrypted(path: &Path) -> (bool, String) {
+    let kept = |e: &io::Error| {
+        (
+            false,
+            format!(
+                "WARNING: kept, as {}. The decrypted file is verified, so delete it yourself",
+                explain::cause(Action::Delete, path, e)
+            ),
+        )
+    };
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return kept(&io::Error::other("it's no longer a regular file")),
+        Err(e) => return kept(&e),
+    };
+    if meta.nlink() > 1 {
+        let others = meta.nlink() - 1;
+        let names = if others == 1 { "1 other name".into() } else { format!("{others} other names") };
+        return match remove_if_same(path, meta.dev(), meta.ino()) {
+            Ok(()) => (true, format!("name removed, but not overwritten, as {names} still lead to it")),
+            Err(e) => kept(&e),
+        };
+    }
+    let zeroed = open_for_overwrite(path).and_then(|(mut file, _)| zero_fill(&mut file, &mut |_| {}));
+    match (remove_if_same(path, meta.dev(), meta.ino()), zeroed) {
+        (Ok(()), Ok(())) => (true, "shredded: overwritten with zeros, name scrambled, then deleted".into()),
+        (Ok(()), Err(e)) => (true, format!("deleted, but not overwritten first ({e})")),
+        (Err(e), _) => kept(&e),
+    }
+}
+
 /// Overwrites a file this program created with zeros, then deletes it under a
 /// scrambled name. Used for unused key files and partial or rejected output.
 pub fn shred(path: &Path) -> io::Result<()> {
@@ -231,6 +267,27 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(fs::read(&witness).unwrap(), vec![0u8; 10]);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "only the witness is left");
+    }
+
+    #[test]
+    fn removes_an_encrypted_file_but_spares_its_other_names() {
+        let dir = Scratch::new("wipe-encrypted");
+        let path = dir.join("a.enc");
+        fs::write(&path, b"ciphertext").unwrap();
+        let (gone, status) = remove_encrypted(&path);
+        assert!(gone && status.starts_with("shredded"), "{status}");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+
+        // Another name for it keeps its contents: only this name goes.
+        fs::write(&path, b"ciphertext").unwrap();
+        fs::hard_link(&path, dir.join("copy.enc")).unwrap();
+        let (gone, status) = remove_encrypted(&path);
+        assert!(gone && status.contains("1 other name"), "{status}");
+        assert!(!path.exists());
+        assert_eq!(fs::read(dir.join("copy.enc")).unwrap(), b"ciphertext");
+
+        let (gone, status) = remove_encrypted(&dir.join("missing.enc"));
+        assert!(!gone && status.starts_with("WARNING: kept"), "{status}");
     }
 
     #[test]

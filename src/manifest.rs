@@ -517,6 +517,37 @@ pub fn record_one(output: &Path, group: &GroupKey, real: Option<&OsStr>) -> Reco
     }
 }
 
+/// Takes the .enc files `removed`, decrypted and shredded, out of their
+/// folders' .encryptor files, removing a file left listing nothing. Returns
+/// what went wrong, if anything did.
+pub fn forget(removed: &[PathBuf]) -> Vec<String> {
+    let mut by_folder: Vec<(&Path, Vec<&OsStr>)> = Vec::new();
+    for path in removed {
+        let (dir, Some(name)) = (files::folder(path), path.file_name()) else { continue };
+        match by_folder.iter_mut().find(|(known, _)| *known == dir) {
+            Some((_, names)) => names.push(name),
+            None => by_folder.push((dir, vec![name])),
+        }
+    }
+    let mut warnings = Vec::new();
+    for (dir, names) in by_folder {
+        let Loaded::Read(mut manifest) = load(dir) else { continue };
+        for group in &mut manifest.groups {
+            group.files.retain(|listed| !names.contains(&listed.name.as_os_str()));
+        }
+        manifest.groups.retain(|group| !group.files.is_empty());
+        let path = dir.join(NAME);
+        let done = match manifest.groups.is_empty() {
+            true => fs::remove_file(&path),
+            false => write_private(&path, &manifest.to_text()),
+        };
+        if let Err(e) = done {
+            warnings.push(format!("couldn't update {}: {e}", safe_path(&path)));
+        }
+    }
+    warnings
+}
+
 /// Whether the .encryptor file beside `enc` lists it.
 pub fn lists(enc: &Path) -> bool {
     match (load(files::folder(enc)), enc.file_name()) {

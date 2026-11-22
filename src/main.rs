@@ -72,7 +72,9 @@ USAGE:
 and decrypt, and `encryptor -v FILE.enc` as view. Anything not given is
 asked for. With several files, you're asked whether to use one universal key
 for them all, saved as FOLDER.key after their folder, or a separate key for
-each. --key-file and --new-key give one key for them all.
+each. --key-file and --new-key give one key for them all. decrypt shreds
+each .enc file once its decrypted file is verified. Short options can be
+stacked: -rn is -r -n.
 
 OPTIONS:
     -r, --recursive       take in every file in the folders given, and in

@@ -269,7 +269,8 @@ updates by itself.
 `encryptor encrypt FILE` and `encryptor decrypt FILE` do the same as
 `encrypt` and `decrypt`, and `encryptor -v FILE.enc` (or `decrypt -v`) the
 same as `encryptor view`; see [Viewing](#viewing). Each option answers one of
-the questions in advance, so it isn't asked:
+the questions in advance, so it isn't asked. Short options can be stacked:
+`-rn` is `-r -n`, and `-ryk KEY` is `-r -y -k KEY`:
 
 | Option                | What it does                                                        |
 | --------------------- | ------------------------------------------------------------------- |
@@ -605,9 +606,10 @@ Decrypt using AES-256-GCM? [y/n]: y
   Cipher         AES-256-GCM (authenticated encryption)
   Key            256-bit
   Auth tag       128-bit, valid: file is authentic and uncorrupted
-  Input          report.pdf.enc  1258725 bytes (1.2 MiB) (kept)
+  Input          report.pdf.enc  1258725 bytes (1.2 MiB)
   Output         report.pdf  1258291 bytes (1.2 MiB)
   Integrity      verified: re-read from disk, SHA-256 matches decrypted data
+  Encrypted      shredded: overwritten with zeros, name scrambled, then deleted
   Metadata       restored permissions 644, accessed and modified times; not restored: created time (this system can't set it)
   Key and data   kept in RAM (never swapped), wiped after use
   Shell history  no entries held the key
@@ -627,8 +629,17 @@ The `.enc` suffix is removed to name the output. Files without it get `.dec`
 added instead. If the output file already exists, you're asked before it is
 overwritten, and the old file is then overwritten with zeros, as it is often
 plaintext from an earlier decryption. If other hard links lead to it, it is
-left as they see it instead, and the report says so. The encrypted file is
-kept.
+left as they see it instead, and the report says so.
+
+Once the decrypted file is written and verified, read back from the disk,
+the encrypted file is **shredded**: overwritten with zeros, renamed to random
+characters, then deleted, and taken out of its folder's
+[`.encryptor` file](#key-groups-the-encryptor-file) and the
+[list of names](#hiding-file-names). Left behind, it would sit beside its
+plaintext, and with a hidden name, its old `.enc` name would give that away.
+If anything goes wrong before that, it's left as it was. With other names
+(hard links), only this name is removed, so the others aren't left as zeros.
+To keep an encrypted copy, copy it before decrypting.
 
 The decrypted file gets the original's metadata back, and the report lists
 anything that couldn't be restored:

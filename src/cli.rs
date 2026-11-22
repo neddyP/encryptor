@@ -51,13 +51,48 @@ pub struct Invocation {
     pub options: Options,
 }
 
+/// Options that take a value, in the next word.
+const TAKE_VALUES: [&str; 5] = ["-k", "-o", "--key-file", "--new-key", "--output"];
+
+/// Splits short options stacked in one word, as `-rn` for `-r -n`, into one
+/// word each. One that takes a value, -k or -o, takes the rest of the word as
+/// it, as in `-kKEY`, or else the next word, as it would on its own. Words
+/// after `--`, and values, are left as they are.
+fn unstack(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let (mut only_words, mut value_next) = (false, false);
+    for arg in args {
+        let stacked = !only_words && !value_next && arg.starts_with('-') && !arg.starts_with("--");
+        if !stacked || arg.chars().count() <= 2 {
+            value_next = !only_words && !value_next && TAKE_VALUES.contains(&arg.as_str());
+            only_words |= arg == "--" && !value_next;
+            out.push(arg.clone());
+            continue;
+        }
+        let mut letters = arg.chars().skip(1);
+        while let Some(letter) = letters.next() {
+            out.push(format!("-{letter}"));
+            if matches!(letter, 'k' | 'o') {
+                let rest: String = letters.collect();
+                match rest.is_empty() {
+                    true => value_next = true,
+                    false => out.push(rest),
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Reads the arguments, with the command first when there is one. Options can
-/// come before or after the file, and `--` ends them, for a file whose name
-/// starts with `-`.
+/// come before or after the file, short ones stacked or not (`-rn` is
+/// `-r -n`), and `--` ends them, for a file whose name starts with `-`.
 pub fn parse(args: &[String], usage: &str) -> Result<Invocation> {
     let mut options = Options::default();
     let (mut help, mut version, mut view) = (false, false, false);
     let mut words = Vec::new();
+    let args = unstack(args);
     let mut args = args.iter();
     let mut only_words = false;
 
@@ -181,7 +216,11 @@ pub fn check(command: Command, options: &Options) -> Result<()> {
             "--hide-names only applies to encrypt: decrypt gives files their real names back by itself".into(),
         )),
         Command::Decrypt if options.keep => {
-            Err(Error::Usage("--keep only applies to encrypt: decrypt always keeps the encrypted file".into()))
+            Err(Error::Usage(
+                "--keep only applies to encrypt: decrypt always shreds the encrypted file once it's decrypted and \
+                 verified"
+                    .into(),
+            ))
         }
         Command::View
             if options.new_key.is_some()
@@ -226,6 +265,31 @@ mod tests {
         assert_eq!(run.options.key_file, Some(PathBuf::from("k.key")));
         assert_eq!(run.options.output, Some(PathBuf::from("out.pdf")));
         assert!(run.options.overwrite);
+    }
+
+    #[test]
+    fn takes_short_options_stacked() {
+        let run = parsed(&["encrypt", "-rn", "docs", "-yq"]).unwrap();
+        let o = &run.options;
+        assert!(o.recursive && o.hide_names && o.yes && o.quiet);
+        assert_eq!(run.files, ["docs"]);
+        // A value comes from the rest of the word, or the next.
+        let run = parsed(&["decrypt", "-rk", "k.key", "docs"]).unwrap();
+        assert!(run.options.recursive);
+        assert_eq!(run.options.key_file, Some(PathBuf::from("k.key")));
+        assert_eq!(run.files, ["docs"]);
+        let run = parsed(&["decrypt", "-ykk.key", "a.enc"]).unwrap();
+        assert!(run.options.yes);
+        assert_eq!(run.options.key_file, Some(PathBuf::from("k.key")));
+        // A value starting with - isn't taken apart, nor anything after --.
+        let run = parsed(&["decrypt", "-k", "-rn.key", "a.enc"]).unwrap();
+        assert_eq!(run.options.key_file, Some(PathBuf::from("-rn.key")));
+        assert!(!run.options.recursive);
+        let run = parsed(&["encrypt", "--", "-rn"]).unwrap();
+        assert_eq!(run.files, ["-rn"]);
+        assert!(!run.options.recursive);
+        assert!(usage_error(parsed(&["encrypt", "-rx", "docs"])).contains("unknown option '-x'"));
+        assert!(parsed(&["-Vr"]).unwrap().command == Command::Version);
     }
 
     #[test]

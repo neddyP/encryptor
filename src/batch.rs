@@ -517,13 +517,18 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
             Err(e) => {
                 overall.pause();
                 stopped("decrypted", input, done.len(), count);
+                forget_removed(&done);
                 return Err(e);
             }
         }
     }
     drop(overall);
+    forget_removed(&done);
     let elapsed = started.elapsed();
     if options.quiet {
+        for opened in done.iter().filter(|opened| !opened.opened.removed) {
+            eprintln!("{}: {}", safe_path(&opened.input), opened.opened.encrypted);
+        }
         return Ok(());
     }
 
@@ -546,7 +551,7 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
         ("Cipher", "AES-256-GCM (authenticated encryption)".to_string()),
         ("Key", key),
         ("Auth tags", "128-bit, every one valid: each file is authentic and uncorrupted".into()),
-        ("Files", format!("{count} decrypted, {} in all; the .enc files are kept", fmt_size(total))),
+        ("Files", format!("{count} decrypted, {} in all", fmt_size(total))),
     ];
     list(
         &mut rows,
@@ -559,6 +564,7 @@ pub fn decrypt(args: &[String], options: &Options) -> Result<()> {
         rows.push(("Left out", found.left_out.join("; ")));
     }
     rows.push(("Integrity", "each verified: re-read from disk, SHA-256 matches its decrypted data".into()));
+    rows.push(("Encrypted", grouped(done.iter().map(|opened| opened.opened.encrypted.as_str()))));
     rows.push(("Metadata", grouped(done.iter().map(|opened| opened.opened.metadata.as_str()))));
     rows.push(("Key and data", protect::memory_status().into()));
     rows.push(("Shell history", history_summary(&history_status)));
@@ -897,6 +903,14 @@ fn unseal(
     let opened = decrypt::unseal(input, &output, encrypted, &unlocked, replace)?;
     let history = opener.is_none().then(|| unlocked.history.clone());
     Ok(Opened { input: input.to_path_buf(), output, opened, len, start, history })
+}
+
+/// Takes the .enc files decrypted and shredded out of the .encryptor files
+/// and the lists of names.
+fn forget_removed(done: &[Opened]) {
+    let removed: Vec<PathBuf> =
+        done.iter().filter(|opened| opened.opened.removed).map(|opened| opened.input.clone()).collect();
+    names::forget_all(&removed);
 }
 
 /// Finds the files `command` works on: those named, and with -r every file

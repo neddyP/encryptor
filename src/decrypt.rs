@@ -233,8 +233,14 @@ pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
     let opened = unseal(&input, &output, encrypted, &unlocked, replace)?;
     let Unlocked { key, passphrase, history, .. } = unlocked;
     drop(key);
+    if opened.removed {
+        names::forget_all(std::slice::from_ref(&input));
+    }
     let elapsed = started.elapsed();
     if options.quiet {
+        if !opened.removed {
+            eprintln!("{}: {}", safe_path(&input), opened.encrypted);
+        }
         return Ok(());
     }
 
@@ -245,9 +251,10 @@ pub fn command_path(input: PathBuf, options: &Options) -> Result<()> {
             ("Cipher", "AES-256-GCM (authenticated encryption)".into()),
             ("Key", key_row(&start, passphrase)),
             ("Auth tag", "128-bit, valid: file is authentic and uncorrupted".into()),
-            ("Input", format!("{}  {} (kept)", safe_path(&input), fmt_size(input_len))),
+            ("Input", format!("{}  {}", safe_path(&input), fmt_size(input_len))),
             ("Output", format!("{}  {}{replaced}", safe_path(&output), fmt_size(opened.len))),
             ("Integrity", "verified: re-read from disk, SHA-256 matches decrypted data".into()),
+            ("Encrypted", opened.encrypted),
             ("Metadata", opened.metadata),
             ("Key and data", protect::memory_status().into()),
             ("Shell history", history),
@@ -278,11 +285,14 @@ pub struct Opened {
     /// What became of the stored metadata.
     pub metadata: String,
     pub replaced: Replaced,
+    /// Whether the encrypted file is gone, and what became of it.
+    pub removed: bool,
+    pub encrypted: String,
 }
 
 /// Decrypts `encrypted`, opened from `input`, to `output` with `unlocked`,
 /// replacing a file there if `replace`, then checks it reads back from the
-/// disk and restores its metadata.
+/// disk and restores its metadata. Then `input` is shredded.
 pub fn unseal(input: &Path, output: &Path, encrypted: Encrypted, unlocked: &Unlocked, replace: bool) -> Result<Opened> {
     let read_error = |e| Error::File(explain::file(Action::Read, input, &e));
     let Encrypted { mut source, start, version, .. } = encrypted;
@@ -302,7 +312,11 @@ pub fn unseal(input: &Path, output: &Path, encrypted: Encrypted, unlocked: &Unlo
     };
     let replaced = out.finish()?;
     let metadata = settle(output, &plain_hash, metadata)?;
-    Ok(Opened { len: plain_len, metadata, replaced })
+    // Decrypted and verified from disk, the encrypted file isn't needed, so
+    // it's shredded: left, it would sit beside its plaintext.
+    drop(source);
+    let (removed, encrypted) = wipe::remove_encrypted(input);
+    Ok(Opened { len: plain_len, metadata, replaced, removed, encrypted })
 }
 
 /// The format version after the magic bytes, which `open` has checked, if

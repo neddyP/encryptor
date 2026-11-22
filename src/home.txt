@@ -20,7 +20,7 @@
 		encryptor  -->  shows this home screen
 		encryptor update  -->  self-explanatory
 
-	Command Flags:
+	Command Flags (short ones stack: -rn = -r -n):
 
 		-r, --recursive  -->  recursive encryption/decryption for whole directories
 		-n, --hide-names  -->  gives each .enc file a random name; decrypt restores the real one

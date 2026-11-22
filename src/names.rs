@@ -227,6 +227,44 @@ pub fn save_or_stop(hidden: &[(PathBuf, OsString)]) -> Result<()> {
     )))
 }
 
+/// Takes the .enc files `removed`, decrypted and shredded, out of the lists
+/// of names, removing a list left empty. Returns what went wrong, if
+/// anything did.
+pub fn forget(removed: &[PathBuf]) -> Vec<String> {
+    let Some(lists) = folder() else { return Vec::new() };
+    let mut by_list: HashMap<PathBuf, Vec<&OsStr>> = HashMap::new();
+    for enc in removed {
+        let (Ok(dir), Some(random)) = (fs::canonicalize(files::folder(enc)), enc.file_name()) else { continue };
+        if is_random(random) {
+            by_list.entry(list_path(&lists, &dir)).or_default().push(random);
+        }
+    }
+    let mut warnings = Vec::new();
+    for (path, randoms) in by_list {
+        let Ok(Some(mut list)) = load(&path) else { continue };
+        for (_, names) in &mut list.folders {
+            names.retain(|(random, _)| !randoms.contains(&random.as_os_str()));
+        }
+        list.folders.retain(|(_, names)| !names.is_empty());
+        let done = match list.folders.is_empty() {
+            true => fs::remove_file(&path).or_else(|e| if e.kind() == io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+            false => manifest::write_private(&path, &list.to_text()),
+        };
+        if let Err(e) = done {
+            warnings.push(format!("couldn't update {}: {e}", safe_path(&path)));
+        }
+    }
+    warnings
+}
+
+/// Forgets the .enc files `removed` in both their .encryptor files and the
+/// lists, warning of anything that went wrong.
+pub fn forget_all(removed: &[PathBuf]) {
+    for warning in manifest::forget(removed).into_iter().chain(forget(removed)) {
+        eprintln!("warning: {warning}");
+    }
+}
+
 /// The real name the lists hold for the .enc file `enc`: in its folder's
 /// list, or, if its folder was moved or renamed, in any list.
 pub fn recall(enc: &Path) -> Option<OsString> {
